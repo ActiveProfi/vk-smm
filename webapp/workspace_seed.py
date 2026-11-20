@@ -147,6 +147,8 @@ def ensure_schema() -> None:
         alters.append("ALTER TABLE user ADD COLUMN privacy_accepted_at TEXT DEFAULT ''")
     if _column_exists("user", "id") and not _column_exists("user", "privacy_policy_version"):
         alters.append("ALTER TABLE user ADD COLUMN privacy_policy_version TEXT DEFAULT ''")
+    if _column_exists("user", "id") and not _column_exists("user", "kie_api_key"):
+        alters.append("ALTER TABLE user ADD COLUMN kie_api_key TEXT DEFAULT ''")
     if _column_exists("security_event", "id") and not _column_exists("security_event", "ip_hash"):
         alters.append("ALTER TABLE security_event ADD COLUMN ip_hash TEXT DEFAULT ''")
     if _column_exists("security_event", "id") and not _column_exists("security_event", "agency_user_id"):
@@ -240,32 +242,28 @@ def seed_generic_rubrics(workspace: Workspace) -> None:
         )
 
 
-def ensure_default_workspace_for_user(user) -> Workspace:
-    """Если у пользователя нет каналов — создать пустой универсальный стартовый канал."""
-    from webapp.services.secrets_box import seal
+def ensure_default_workspace_for_user(user):
+    """Открыть реальный канал команды. Пустой «Мой канал» сам больше не создаётся."""
+    from webapp.services import access as acc
+    from webapp.services.channel_care import AUTO_CHANNEL_NAME, retire_empty_staff_channels
 
-    existing = Workspace.query.filter_by(user_id=user.id).first()
-    if existing:
-        if not user.active_workspace_id:
-            user.active_workspace_id = existing.id
-            db.session.commit()
-        return existing
-
-    ws = Workspace(
-        user_id=user.id,
-        name="Мой канал",
-        theme="",
-        description="",
-        brand_site="",
-        search_hint="",
-        knowledge_text="",
-        vk_token=seal(user.vk_token or ""),
-        vk_group_id=user.vk_group_id or "",
-        is_active=True,
+    retire_empty_staff_channels()
+    channels = list(acc.list_workspaces(user, active_only=True))
+    current = None
+    if user.active_workspace_id:
+        current = next((row for row in channels if row.id == user.active_workspace_id), None)
+    if current:
+        return current
+    picked = next(
+        (row for row in channels if (row.name or "").strip() != AUTO_CHANNEL_NAME),
+        None,
     )
-    db.session.add(ws)
-    db.session.flush()
-    seed_generic_rubrics(ws)
-    user.active_workspace_id = ws.id
-    db.session.commit()
-    return ws
+    if picked is None and channels:
+        picked = channels[0]
+    if picked and user.active_workspace_id != picked.id:
+        user.active_workspace_id = picked.id
+        db.session.commit()
+    elif not picked and user.active_workspace_id:
+        user.active_workspace_id = None
+        db.session.commit()
+    return picked

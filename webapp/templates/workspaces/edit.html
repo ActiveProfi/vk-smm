@@ -277,12 +277,12 @@
     {% if vk_status and vk_status.ready %}
       <div class="alert alert-success py-2 small">
         Данные для публикации уже есть
-        {% if vk_status.has_channel_token %}в этом канале{% elif vk_status.has_env_fallback %}в файле .env проекта{% endif %}.
+        {% if vk_status.has_channel_token %}в этом канале{% else %}для этого кабинета{% endif %}.
         Нажмите «Проверить подключение», чтобы убедиться.
       </div>
     {% else %}
       <div class="alert alert-warning py-2 small">
-        Токен или ID группы ещё не заданы. Заполните поля ниже или пропишите их в <code>.env</code>.
+        Токен или номер группы ещё не заданы. Заполните поля ниже на этой странице.
       </div>
     {% endif %}
 
@@ -319,7 +319,7 @@
         {% if workspace and workspace.vk_token %}
           Токен уже сохранён в канале. Введите новый, только если хотите заменить.
         {% else %}
-          Если поле пустое — при публикации возьмём токен из <code>.env</code> (если он там есть).
+          Если поле пустое, сохранится токен, который уже записан у этого канала.
         {% endif %}
       </div>
     </div>
@@ -362,8 +362,7 @@
           {% if workspace and workspace.vk_ads_token %}
             Токен уже сохранён. Введите новый, только если хотите заменить.
           {% else %}
-            Access token из ads.vk.ru → Настройки → Доступ к API.
-            Можно временно положить в <code>.env</code> как <code>VK_ADS_TOKEN</code>.
+            Access token из ads.vk.ru → Настройки → Доступ к API. Вставьте его в это поле.
           {% endif %}
         </div>
       </div>

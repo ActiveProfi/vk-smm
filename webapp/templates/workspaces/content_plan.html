@@ -72,6 +72,9 @@
       <button type="button" class="btn btn-accent w-100" id="btn-generate-plan" {% if not rubrics %}disabled{% endif %}>
         ИИ-маркетолог
       </button>
+      <button type="button" class="btn btn-outline-dark w-100 mt-2" id="btn-add-manual" {% if not rubrics %}disabled{% endif %}>
+        Добавить тему самому
+      </button>
     </div>
   </div>
   <p class="small text-muted mt-3 mb-0" id="plan-hint">
@@ -205,6 +208,7 @@
   const sendClientUrl = {{ url_for('workspaces.content_plan_send_client', workspace_id=workspace.id) | tojson }};
   const requireClientApproval = {{ require_client_approval | tojson }};
   const FORMAT_OPTIONS = {{ publish_formats | tojson }};
+  const RUBRICS = {{ rubrics | tojson }};
 
   const postsInput = document.getElementById("posts-count");
   const startDateInput = document.getElementById("plan-start-date");
@@ -308,11 +312,7 @@
         '<td><input class="form-control form-control-sm plan-time" type="time" value="' +
         escapeAttr(timeVal) +
         '" title="Время публикации — можно изменить вручную"></td>' +
-        '<td><span class="small">' +
-        escapeHtml(item.rubric_title || item.rubric_code || "") +
-        '</span><input type="hidden" class="plan-rubric" value="' +
-        escapeAttr(item.rubric_code || "") +
-        '"></td>' +
+        '<td>' + rubricSelectHtml(item.rubric_code) + '</td>' +
         '<td><input class="form-control form-control-sm plan-topic" value="' +
         escapeAttr(item.topic || "") +
         '"></td>' +
@@ -355,6 +355,15 @@
     return "image";
   }
 
+  function rubricSelectHtml(selected) {
+    const code = String(selected || "");
+    const options = (RUBRICS || []).map((rubric) => {
+      const mark = rubric.code === code ? " selected" : "";
+      return '<option value="' + escapeAttr(rubric.code) + '"' + mark + ">" + escapeHtml(rubric.title || rubric.code) + "</option>";
+    }).join("");
+    return '<select class="form-select form-select-sm plan-rubric" aria-label="Рубрика">' + options + "</select>";
+  }
+
   function formatSelectHtml(selected) {
     const code = normalizeFormat(selected);
     const options = FORMAT_OPTIONS.map((opt) => {
@@ -388,13 +397,31 @@
         time: hour + ":" + minute,
         scheduled_for: scheduled,
         rubric_code: tr.querySelector(".plan-rubric")?.value || "",
-        rubric_title: "",
+        rubric_title: tr.querySelector(".plan-rubric")?.selectedOptions?.[0]?.textContent || "",
         topic: tr.querySelector(".plan-topic")?.value || "",
         format: tr.querySelector(".plan-format")?.value || "",
         note: tr.querySelector(".plan-note")?.value || "",
       };
     }).filter((x) => (x.topic || "").trim().length >= 3);
   }
+
+  document.getElementById("btn-add-manual")?.addEventListener("click", () => {
+    const first = (RUBRICS || [])[0] || { code: "", title: "" };
+    const items = collectItemsFromTable();
+    items.push({
+      date: (startDateInput?.value || "").trim(),
+      time: "10:00",
+      topic: "Новая тема",
+      rubric_code: first.code,
+      rubric_title: first.title || "",
+      format: "image",
+      note: "",
+    });
+    renderTable(items, {});
+    if (resultMeta) {
+      resultMeta.textContent = "Тема добавлена вручную. Переименуйте её, поставьте дату и сохраните план. Нейросеть для этого не нужна.";
+    }
+  });
 
   async function startGenerate() {
     showProgress(true);

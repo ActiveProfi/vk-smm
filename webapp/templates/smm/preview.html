@@ -107,15 +107,15 @@
           {{ schedule_form.sched_month() }}
           {{ schedule_form.sched_year() }}
         </div>
-        <div class="form-label small">Время (+10)</div>
+        <div class="form-label small">Время, Владивосток (UTC+10)</div>
         <div class="datetime-row mb-2">
           {{ schedule_form.sched_hour() }}
           {{ schedule_form.sched_minute() }}
         </div>
         {% if draft.scheduled_for %}
-        <p class="small text-muted">Сейчас: {{ draft.scheduled_for }}</p>
+        <p class="small text-muted">Сейчас: {{ format_publish_at(draft.scheduled_for) if format_publish_at is defined else draft.scheduled_for }}</p>
         {% endif %}
-        <button type="submit" class="btn btn-outline-dark btn-sm w-100">Сохранить дату</button>
+        <button type="submit" class="btn btn-outline-dark btn-sm w-100 visually-hidden">Сохранить дату</button>
       </form>
       <form method="post" id="publish-form" class="mt-3">
         {{ publish_form.hidden_tag() }}
@@ -144,7 +144,13 @@
           <div class="small text-muted">запись на стене</div>
         </div>
       </header>
-      <div class="vk-card__text preview-text" id="preview-text">{{ draft.post_text | vk_post_html | safe }}</div>
+      <div class="vk-card__text preview-text" id="preview-text">
+        {% if draft.post_text %}
+        {{ draft.post_text | vk_post_html | safe }}
+        {% else %}
+        <p class="text-muted mb-0">Текста ещё нет. Откройте вкладку «Текст» и сгенерируйте пост. Если ключа нейросети нет, впишите его в «Настройки данных» — без ключа текст не соберётся. Картинка появится после текста.</p>
+        {% endif %}
+      </div>
       <div id="preview-image-block" class="{% if not draft.image_url %}d-none{% endif %}">
         {% if draft.image_url %}
         <img src="{{ draft.image_url }}" alt="Картинка поста" id="preview-image" class="vk-card__media">

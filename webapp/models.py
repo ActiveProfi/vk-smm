@@ -26,6 +26,8 @@ class User(UserMixin, db.Model):
     privacy_accepted_at = db.Column(db.String(32), default="")
     # Версия политики, с которой человек согласился. Если версия сменилась — просим согласие снова.
     privacy_policy_version = db.Column(db.String(32), default="")
+    # Ключ нейросети KIE, зашифрован так же, как токен ВК. Пусто — ключ не задан.
+    kie_api_key = db.Column(db.Text, default="")
 
     drafts = db.relationship(
         "Draft",
@@ -49,18 +51,12 @@ class User(UserMixin, db.Model):
     def get_active_workspace(self):
         from webapp.services import access as acc
 
+        channels = list(acc.list_workspaces(self, active_only=True))
         if self.active_workspace_id:
-            ws = db.session.get(Workspace, self.active_workspace_id)
-            if ws and acc.can_access_workspace(self, ws):
-                return ws
-        first = acc.list_workspaces(self).first()
-        if first:
-            return first
-        return (
-            Workspace.query.filter_by(user_id=self.id, is_active=True)
-            .order_by(Workspace.id.asc())
-            .first()
-        )
+            for ws in channels:
+                if ws.id == self.active_workspace_id:
+                    return ws
+        return channels[0] if channels else None
 
 
 class TeamMember(db.Model):

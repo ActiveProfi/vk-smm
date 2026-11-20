@@ -387,9 +387,16 @@ def get_api_key() -> str:
     load_dotenv_file()
     api_key = os.environ.get("KIE_API_KEY", "").strip()
     if not api_key:
+        try:
+            from webapp.services.user_keys import current_kie
+
+            api_key = current_kie()
+        except Exception:
+            api_key = ""
+    if not api_key:
         raise ValueError(
-            "Не найден KIE_API_KEY. "
-            "Добавьте его в переменную среды или в локальный файл .env."
+            "Нет ключа KIE. Откройте «Настройки данных» и впишите ключ. "
+            "Без него тексты, картинки и контент-план не собираются."
         )
     return api_key
 

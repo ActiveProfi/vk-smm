@@ -29,7 +29,8 @@
         <a class="crm-link{% if request.endpoint in ['smm.dashboard', 'smm.preview', 'smm.generate', 'smm.generation_queue'] %} is-active{% endif %}" href="{{ url_for('smm.dashboard') }}">Черновики</a>
         <a class="crm-link{% if request.endpoint == 'smm.calendar' %} is-active{% endif %}" href="{{ url_for('smm.calendar') }}">Календарь</a>
         <a class="crm-link{% if request.endpoint and 'approval' in (request.endpoint or '') %} is-active{% endif %}" href="{{ url_for('smm.client_approvals') }}">Согласование</a>
-        <a class="crm-link{% if request.endpoint in ['smm.month_report', 'smm.month_report_excel', 'smm.month_report_pdf', 'smm.stats'] %} is-active{% endif %}" href="{{ url_for('smm.month_report') }}">Отчёты</a>
+        <a class="crm-link{% if request.endpoint == 'smm.stats' %} is-active{% endif %}" href="{{ url_for('smm.stats') }}">Статистика</a>
+        <a class="crm-link{% if request.endpoint in ['smm.month_report', 'smm.month_report_excel', 'smm.month_report_pdf'] %} is-active{% endif %}" href="{{ url_for('smm.month_report') }}">Отчёты</a>
         <a class="crm-link{% if request.endpoint and request.endpoint.startswith('smm.ads') %} is-active{% endif %}" href="{{ url_for('smm.ads_cabinets') }}">Реклама</a>
         <a class="crm-link{% if request.endpoint == 'team.index' %} is-active{% endif %}" href="{{ url_for('team.index') }}">Команда</a>
         {% if can_manage_team %}
@@ -52,26 +53,29 @@
         {% if nav_workspaces %}
         <div class="dropdown">
           <button class="btn btn-sm nav-client-btn dropdown-toggle" type="button" data-bs-toggle="dropdown">
-            <span id="nav-active-channel">{{ active_workspace.name if active_workspace else 'Выберите клиента' }}</span>
+            <span id="nav-active-channel">{{ active_workspace.name if active_workspace else 'Выберите канал' }}{% if active_workspace and active_workspace.theme %} · {{ active_workspace.theme }}{% endif %}</span>
           </button>
           <ul class="dropdown-menu">
             {% for ws in nav_workspaces %}
             <li>
               <form method="post" action="{{ url_for('workspaces.select_workspace', workspace_id=ws.id) }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <input type="hidden" name="next" value="content_plan">
-                <button type="submit" class="dropdown-item{% if active_workspace and active_workspace.id == ws.id %} active{% endif %}">{{ ws.name }}</button>
+                <input type="hidden" name="next" value="{{ nav_section }}">
+                <button type="submit" class="dropdown-item{% if active_workspace and active_workspace.id == ws.id %} active{% endif %}">{{ ws.name }}{% if ws.theme %} · {{ ws.theme }}{% else %} · тематика не указана{% endif %}</button>
               </form>
             </li>
             {% endfor %}
             <li><hr class="dropdown-divider"></li>
-            <li><a class="dropdown-item" href="{{ url_for('workspaces.list_workspaces') }}">Все клиенты</a></li>
+            <li><a class="dropdown-item" href="{{ url_for('workspaces.list_workspaces') }}">Все каналы</a></li>
           </ul>
         </div>
         {% endif %}
       </div>
       {% if dev_skip_auth %}
       <div class="dev-skip-banner">Режим разработки: вход без логина включён (WEBAPP_DEV_SKIP_AUTH=1)</div>
+      {% endif %}
+      {% if user_role_code == 'viewer' %}
+      <div class="alert alert-info py-2 mb-0 rounded-0">Режим только просмотра: посты, рубрики и настройки каналов менять нельзя.</div>
       {% endif %}
   {% endif %}
   {% endblock %}

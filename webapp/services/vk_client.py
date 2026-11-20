@@ -36,13 +36,13 @@ def resolve_token_and_group(
     group_id = (user_group_id or "").strip() or os.environ.get("VK_GROUP_ID", "").strip()
     if not token:
         raise ValueError(
-            "Не задан VK-токен. Вставьте его в настройках канала "
-            "или добавьте VK_USER_TOKEN в файл .env"
+            "Не задан токен ВК. Откройте «Каналы» → нужный канал → «Настройки» "
+            "и вставьте токен группы."
         )
     if not group_id:
         raise ValueError(
-            "Не задан ID группы ВК. Укажите его в настройках канала "
-            "или добавьте VK_GROUP_ID в файл .env"
+            "Не задан номер группы ВК. Откройте «Каналы» → нужный канал → «Настройки» "
+            "и впишите ID группы."
         )
     # ID группы может прийти как club123 / -123 / 123
     group_id = str(group_id).strip()
@@ -72,8 +72,8 @@ def test_connection(*, user_token: str = "", user_group_id: str = "") -> dict:
         group_id = group_id[1:]
     if not group_id:
         raise ValueError(
-            "Не задан ID группы ВК. Укажите его в настройках канала "
-            "или добавьте VK_GROUP_ID в файл .env"
+            "Не задан номер группы ВК. Откройте «Каналы» → нужный канал → «Настройки» "
+            "и впишите ID группы."
         )
 
     candidates: list[tuple[str, str]] = []
@@ -90,8 +90,8 @@ def test_connection(*, user_token: str = "", user_group_id: str = "") -> dict:
 
     if not candidates:
         raise ValueError(
-            "Не задан VK-токен. Вставьте его в настройках канала "
-            "или добавьте VK_USER_TOKEN / VK_COMMUNITY_TOKEN в .env"
+            "Не задан токен ВК. Откройте «Каналы» → нужный канал → «Настройки» "
+            "и вставьте токен группы."
         )
 
     last_error: Exception | None = None
@@ -198,8 +198,8 @@ def _friendly_vk_error(error: dict) -> str:
     if code == 5 and "ip address" in msg.lower():
         return (
             "Токен привязан к другому IP (выдан с другого компьютера/сети). "
-            "Получите новый токен пользователя с правом offline и вставьте его "
-            "в настройки канала или в .env (VK_USER_TOKEN)."
+            "Получите новый токен с правом offline и вставьте его "
+            "в «Каналы» → этот канал → «Настройки»."
         )
     if code == 5:
         return f"Токен ВК недействителен или отозван. Получите новый. Детали: {msg}"

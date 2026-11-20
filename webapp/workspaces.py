@@ -207,13 +207,20 @@ def select_workspace(workspace_id: int):
         )
 
     nxt = (request.form.get("next") or request.args.get("next") or "content_plan").strip()
-    if nxt == "generate":
-        return redirect(url_for("smm.generate"))
-    if nxt == "channels":
-        return redirect(url_for("workspaces.list_workspaces"))
-    if nxt == "drafts":
-        return redirect(url_for("smm.dashboard"))
-    return redirect(url_for("workspaces.content_plan", workspace_id=ws.id))
+    stay = {
+        "generate": url_for("smm.generate"),
+        "channels": url_for("workspaces.list_workspaces"),
+        "drafts": url_for("smm.dashboard"),
+        "calendar": url_for("smm.calendar"),
+        "stats": url_for("smm.stats"),
+        "queue": url_for("smm.generation_queue"),
+        "report": url_for("smm.month_report", workspace_id=ws.id),
+        "approvals": url_for("smm.client_approvals", workspace_id=ws.id),
+        "ads": url_for("smm.ads_cabinets"),
+        "dashboard": url_for("smm.manager_panel"),
+        "content_plan": url_for("workspaces.content_plan", workspace_id=ws.id),
+    }
+    return redirect(stay.get(nxt, stay["content_plan"]))
 
 
 @workspaces_bp.route("/switch", methods=["POST"])
@@ -240,6 +247,22 @@ def create_workspace():
         from webapp.services import business as biz
 
         owner_id = acc.agency_owner_id(current_user)
+        from webapp.services.channel_care import name_taken
+
+        if name_taken(owner_id, form.name.data or ""):
+            flash(
+                "Канал с таким названием уже есть. Добавьте тематику в название, чтобы не перепутать.",
+                "warning",
+            )
+            return render_template(
+                "workspaces/edit.html",
+                form=form,
+                workspace=None,
+                vk_status=_vk_status_for_workspace(None),
+                visual_refs=[],
+                package_status=None,
+                client_approve_url="",
+            )
         ws = Workspace(
             user_id=owner_id,
             name=form.name.data.strip(),
@@ -304,6 +327,14 @@ def edit_workspace(workspace_id: int):
             form.seed_mode.data = "empty"
 
     if form.validate_on_submit():
+        from webapp.services.channel_care import name_taken
+
+        if name_taken(ws.user_id, form.name.data or "", exclude_id=ws.id):
+            flash(
+                "Канал с таким названием уже есть. Добавьте тематику в название, чтобы не перепутать.",
+                "warning",
+            )
+            return redirect(url_for("workspaces.edit_workspace", workspace_id=ws.id))
         ws.name = form.name.data.strip()
         ws.theme = (form.theme.data or "").strip()
         ws.description = (form.description.data or "").strip()
@@ -920,6 +951,9 @@ def _active_rubrics_payload(ws: Workspace) -> list[dict[str, str]]:
 
 def _run_content_plan_job(app, job_id: str, payload: dict) -> None:
     with app.app_context():
+        from webapp.services.user_keys import bind
+
+        bind(payload.get("user_id"))
         progress = job_store.make_progress_callback(job_id)
         try:
             progress("prepare", "ИИ-маркетолог изучает канал и аудиторию…")

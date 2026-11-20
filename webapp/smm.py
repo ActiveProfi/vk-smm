@@ -234,6 +234,9 @@ def _set_job_approval_required(job_id: str, message: str, *, draft_id: int | Non
 
 def _run_generate_job(app, job_id: str, payload: dict) -> None:
     with app.app_context():
+        from webapp.services.user_keys import bind
+
+        bind(payload.get("user_id"))
         progress = job_store.make_progress_callback(job_id)
         try:
             progress("prepare", "Подготовка данных…")
@@ -409,6 +412,9 @@ def _run_generate_job(app, job_id: str, payload: dict) -> None:
 
 def _run_text_regen_job(app, job_id: str, payload: dict) -> None:
     with app.app_context():
+        from webapp.services.user_keys import bind
+
+        bind(payload.get("user_id"))
         progress = job_store.make_progress_callback(job_id)
         draft_id = int(payload.get("draft_id") or 0)
         try:
@@ -566,15 +572,18 @@ def dashboard():
             db.session.commit()
             materials_bag.bind_workspace(cand.id)
             ws = cand
-    _sync_materials_for_workspace(ws)
+    if ws:
+        _sync_materials_for_workspace(ws)
     from webapp.services import schedule_queue as sq
     from webapp.services.draft_schedule import is_overdue
 
-    workspaces = list(acc.list_workspaces(current_user, active_only=True))
+    workspaces = [ws] if ws else []
     all_drafts = (
-        _drafts_for_workspace()
+        _drafts_for_workspace(ws.id if ws else -1)
         .order_by(Draft.scheduled_for.desc(), Draft.id.desc())
         .all()
+        if ws
+        else []
     )
     by_ws: dict[int, list] = {}
     for draft in all_drafts:
@@ -665,7 +674,7 @@ def manager_panel():
     from webapp.workspace_seed import ensure_default_workspace_for_user
 
     ensure_default_workspace_for_user(current_user)
-    workspaces = list(acc.list_workspaces(current_user, active_only=False))
+    workspaces = list(acc.list_workspaces(current_user, active_only=True))
     drafts = _drafts_for_workspace().all()
     rubric_counts: dict[int, int] = {}
     if workspaces:
@@ -712,19 +721,18 @@ def manager_panel():
 @smm_bp.route("/generation-queue")
 @login_required
 def generation_queue():
-    """Очередь генерации (вариант B): посты, до публикации которых ≤ 24 ч.
-
-    Сейчас — по всем каналам текущего пользователя.
-    Позже здесь же вырастет панель менеджера (уведомления по каналам).
-    """
+    """Очередь генерации выбранного канала: посты, до публикации которых ≤ 24 ч."""
     from webapp.models import Workspace
     from webapp.services import schedule_queue as sq
 
+    ws = _active_workspace()
     drafts = (
-        _drafts_for_workspace()
+        _drafts_for_workspace(ws.id if ws else -1)
         .filter(Draft.scheduled_for != "")
         .order_by(Draft.scheduled_for.asc())
         .all()
+        if ws
+        else []
     )
     channel_filter = (request.args.get("channel") or "").strip()
     channel_id = int(channel_filter) if channel_filter.isdigit() else None
@@ -761,7 +769,7 @@ def generation_queue():
         urgency_label=sq.urgency_label,
         hours_until_publish=sq.hours_until_publish,
         format_publish_at=sq.format_publish_at,
-        active_workspace=_active_workspace(),
+        active_workspace=ws,
     )
 
 
@@ -1147,9 +1155,13 @@ def generate_job_approve(job_id: str):
 @login_required
 def generate():
     ws = _active_workspace()
-    if not acc.can(current_user, "generate", ws) and request.method == "POST":
-        flash("Недостаточно прав для генерации.", "warning")
+    if not ws:
+        flash("Сначала создайте канал: так у каждого сообщества будет своё имя.", "warning")
+        if acc.can(current_user, "workspace_create"):
+            return redirect(url_for("workspaces.create_workspace"))
         return redirect(url_for("smm.manager_panel"))
+    if not acc.can(current_user, "generate", ws):
+        return render_template("smm/readonly.html", workspace=ws)
     _sync_materials_for_workspace(ws)
     form = GenerateForm()
     form.post_type.choices = _rubric_choices(ws)
@@ -1241,8 +1253,13 @@ def preview_visual_start(draft_id: int):
     draft.generation_warning = ""
     db.session.commit()
 
+    key_user_id = int(current_user.id)
+
     def _worker():
         with app.app_context():
+            from webapp.services.user_keys import bind
+
+            bind(key_user_id)
             progress = job_store.make_progress_callback(job_id)
             try:
                 progress("visual_prepare", "Идёт генерация визуала…")
@@ -1651,8 +1668,13 @@ def preview_animation_start(draft_id: int):
     draft_id_copy = int(draft.id)
     image_exists = has_image
 
+    key_user_id = int(current_user.id)
+
     def _worker():
         with app.app_context():
+            from webapp.services.user_keys import bind
+
+            bind(key_user_id)
             progress = job_store.make_progress_callback(job_id)
             try:
                 progress("visual_prepare", "Готовим видео-анимацию (Veo 3.1)…")
@@ -1719,7 +1741,9 @@ def preview_animation_start(draft_id: int):
                         step="error",
                         message="Видео-анимация не получилась",
                         percent=100,
-                        error=d.generation_warning or "Проверьте ключ KIE_API_KEY в .env.",
+                        error=d.generation_warning or (
+                            "Нет ключа KIE. Откройте «Настройки данных» и впишите ключ."
+                        ),
                     )
                     return
                 job_store.update_job(
@@ -1738,7 +1762,9 @@ def preview_animation_start(draft_id: int):
                     step="error",
                     message="Ошибка видео-анимации",
                     percent=100,
-                    error=scrub_secrets(str(exc)) or "Не удалось создать видео. Проверьте KIE_API_KEY.",
+                    error=scrub_secrets(str(exc)) or (
+                        "Не удалось создать видео. Откройте «Настройки данных» и проверьте ключ KIE."
+                    ),
                 )
 
     threading.Thread(target=_worker, daemon=True).start()
@@ -1750,6 +1776,9 @@ def preview_animation_start(draft_id: int):
 def preview(draft_id: int):
     draft = _user_draft(draft_id)
     ws = draft.workspace or _active_workspace()
+    if ws and current_user.active_workspace_id != ws.id and acc.can_access_workspace(current_user, ws):
+        current_user.active_workspace_id = ws.id
+        db.session.commit()
     publish_form = PublishForm()
     schedule_form = ScheduleForm()
     action = request.form.get("form_action", "")
@@ -1881,9 +1910,12 @@ def preview(draft_id: int):
         if draft.content_plan_id and draft.content_plan:
             plan_status = biz.client_status_label(draft.content_plan.client_status)
 
+    from webapp.services import schedule_queue as sq
+
     return render_template(
         "smm/preview.html",
         draft=draft,
+        format_publish_at=sq.format_publish_at,
         publish_with_image=pub_image,
         publish_with_video=pub_video,
         workspace=ws,
@@ -1916,6 +1948,8 @@ def calendar():
         .filter(Draft.scheduled_for != "")
         .order_by(Draft.scheduled_for.asc())
         .all()
+        if ws
+        else []
     )
     from webapp.services import schedule_queue as sq
 
@@ -1938,8 +1972,16 @@ def stats():
     data = None
     from webapp.services.secrets_box import reveal
 
-    token = reveal(ws.vk_token) or reveal(current_user.vk_token) or ""
-    group_id = ws.vk_group_id or current_user.vk_group_id or ""
+    if not ws:
+        error = (
+            "Сначала создайте канал. Затем откройте «Каналы» → «Настройки» "
+            "и вставьте токен и номер группы ВК."
+        )
+        token = ""
+        group_id = ""
+    else:
+        token = reveal(ws.vk_token) or reveal(current_user.vk_token) or ""
+        group_id = ws.vk_group_id or current_user.vk_group_id or ""
     try:
         posts_limit = int(request.args.get("posts") or 30)
     except (TypeError, ValueError):
@@ -2207,10 +2249,13 @@ def ads_report():
 @smm_bp.route("/report/<int:workspace_id>")
 @login_required
 def month_report(workspace_id: int | None = None):
-    """Месячный отчёт клиенту: план / готово / опубликовано + расходы API."""
+    """Месячный отчёт: план / готово / опубликовано + расходы API."""
     from webapp.services import business as biz
 
     ws, year, month = _resolve_report_period(workspace_id)
+    if not ws:
+        flash("Сначала создайте канал — отчёт строится по одному каналу.", "warning")
+        return redirect(url_for("workspaces.list_workspaces"))
     report = biz.build_month_report(ws, year=year, month=month)
     month_choices = [
         {"value": m, "label": biz.MONTH_NAMES_RU[m].capitalize()}

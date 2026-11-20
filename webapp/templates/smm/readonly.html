@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Только просмотр · VK SMM{% endblock %}
+{% block content %}
+<div class="panel">
+  <p class="lk-kicker mb-1">Режим только просмотра</p>
+  <h1 class="h4 mb-2">Генерация недоступна</h1>
+  <p class="mb-2">
+    Ваша роль — наблюдатель. На всех каналах можно смотреть план, статистику и отчёты.
+    Создавать и публиковать посты нельзя.
+  </p>
+  {% if workspace %}
+  <p class="text-muted small mb-3">Канал: {{ workspace.name }}{% if workspace.theme %} · {{ workspace.theme }}{% endif %}</p>
+  {% endif %}
+  <a class="btn btn-outline-dark" href="{{ url_for('smm.manager_panel') }}">На дашборд</a>
+</div>
+{% endblock %}

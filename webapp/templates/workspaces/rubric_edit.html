@@ -5,13 +5,14 @@
 <h1 class="h3 mb-3">{% if rubric %}Изменить рубрику{% else %}Новая рубрика{% endif %}</h1>
 <p class="text-muted">Канал: {{ workspace.name }}</p>
 <div class="panel" style="max-width:860px">
-  <form method="post" id="rubric-form">
+  <form method="post" id="rubric-form" novalidate>
     {{ form.hidden_tag() }}
     {{ form.code(type="hidden", id="code") }}
     <div class="row g-3">
       <div class="col-md-8">
         {{ form.title.label(class="form-label") }}
         {{ form.title(class="form-control", id="title") }}
+        {% for err in form.title.errors %}<div class="text-danger small">{{ err }}</div>{% endfor %}
         <div class="form-text">
           Технический код создаётся сам из названия
           {% if rubric and rubric.code %}(сейчас: <code>{{ rubric.code }}</code>){% else %}после сохранения{% endif %}.
@@ -24,6 +25,7 @@
           <button type="button" class="btn btn-sm btn-outline-warning" id="btn-ai-rubric">ИИ генерация</button>
         </div>
         {{ form.prompt_text(class="form-control", id="prompt_text") }}
+        {% for err in form.prompt_text.errors %}<div class="text-danger small">{{ err }}</div>{% endfor %}
         <div class="form-text">
           Опишите структуру поста, тон, что можно/нельзя писать <strong>и стиль картинки</strong> для этой рубрики.
           Черновик текста автоматически сохраняется в браузере, пока вы не нажмёте «Сохранить рубрику».

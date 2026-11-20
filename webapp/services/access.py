@@ -88,27 +88,17 @@ def agency_owner_id(user: User) -> int:
 
 
 def role_for_user(user: User, workspace: Workspace | None = None) -> str:
-    """
-    Роль относительно кабинета / канала.
-    Владелец каналов = owner; сотрудник = manager|viewer.
+    """Роль в команде одна и та же на всех каналах.
+
+    Сотрудник не становится владельцем только потому, что канал числится на его логине.
     """
     if not user:
         return ROLE_VIEWER
-    if workspace is not None:
-        if workspace.user_id == user.id:
-            return ROLE_OWNER
-        m = TeamMember.query.filter_by(
-            agency_user_id=workspace.user_id,
-            user_id=user.id,
-            is_active=True,
-        ).first()
-        if m:
-            return (m.role or ROLE_VIEWER).strip().lower()
+    membership = membership_for(user)
+    if membership:
+        return (membership.role or ROLE_VIEWER).strip().lower()
+    if workspace is not None and workspace.user_id != user.id:
         return ROLE_VIEWER
-
-    m = membership_for(user)
-    if m:
-        return (m.role or ROLE_VIEWER).strip().lower()
     return ROLE_OWNER
 
 
@@ -159,16 +149,10 @@ def guard(perm: str, workspace: Workspace | None = None):
 
 
 def can_access_workspace(user: User, workspace: Workspace | None) -> bool:
-    if not user or not workspace:
+    if not user or not workspace or not workspace.is_active:
         return False
-    if workspace.user_id == user.id:
-        return True
-    m = TeamMember.query.filter_by(
-        agency_user_id=workspace.user_id,
-        user_id=user.id,
-        is_active=True,
-    ).first()
-    return bool(m)
+    # Сотрудник видит только каналы владельца команды, не личную пустышку.
+    return workspace.user_id == agency_owner_id(user)
 
 
 def accessible_workspace_ids(user: User) -> list[int]:
@@ -178,18 +162,7 @@ def accessible_workspace_ids(user: User) -> list[int]:
         .with_entities(Workspace.id)
         .all()
     )
-    ids = [int(r[0]) for r in rows]
-    # Свои каналы тоже (если сотрудник завёл личные)
-    if owner_id != user.id:
-        own = (
-            Workspace.query.filter_by(user_id=user.id, is_active=True)
-            .with_entities(Workspace.id)
-            .all()
-        )
-        for r in own:
-            if int(r[0]) not in ids:
-                ids.append(int(r[0]))
-    return ids
+    return [int(r[0]) for r in rows]
 
 
 def list_workspaces(user: User, *, active_only: bool = True):

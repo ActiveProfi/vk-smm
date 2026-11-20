@@ -550,6 +550,43 @@ def plan_items_from_json(raw: str | None) -> list[dict]:
     return data if isinstance(data, list) else []
 
 
+def _human_plan_title(start_date: str, days: int, count: int) -> str:
+    """«План с 1 декабря 2026», а не 2026-12-01."""
+    label = (start_date or "").strip()[:10]
+    try:
+        from datetime import date as date_cls
+
+        day = date_cls.fromisoformat(label)
+        months = (
+            "",
+            "января",
+            "февраля",
+            "марта",
+            "апреля",
+            "мая",
+            "июня",
+            "июля",
+            "августа",
+            "сентября",
+            "октября",
+            "ноября",
+            "декабря",
+        )
+        label = f"{day.day} {months[day.month]} {day.year}"
+    except ValueError:
+        label = label or "выбранной даты"
+    n = abs(int(count))
+    if n % 10 == 1 and n % 100 != 11:
+        word = "тема"
+    elif n % 10 in {2, 3, 4} and n % 100 not in {12, 13, 14}:
+        word = "темы"
+    else:
+        word = "тем"
+    if label and label != "выбранной даты":
+        return f"План с {label} · {days} дн. · {count} {word}"
+    return f"План · {days} дн. · {count} {word}"
+
+
 def create_plan_for_client(
     *,
     ws: Workspace,
@@ -583,11 +620,7 @@ def create_plan_for_client(
     if not clean:
         raise ValueError("В плане нет тем для согласования.")
 
-    title = f"План на {days} дн."
-    if start_date:
-        title = f"План с {start_date} · {days} дн. · {len(clean)} тем"
-    else:
-        title = f"План · {days} дн. · {len(clean)} тем"
+    title = _human_plan_title(start_date, int(days or 7), len(clean))
 
     ensure_client_token(ws)
     batch = ContentPlanBatch(
@@ -814,7 +847,10 @@ def run_auto_publish_for_workspace(
     if not token or not group_id:
         return {
             "ok": False,
-            "error": "Нет VK токена или ID группы (в канале или в .env).",
+            "error": (
+                "Нет токена или номера группы ВК. "
+                "Откройте «Каналы» → этот канал → «Настройки» и заполните оба поля."
+            ),
             "published": 0,
             "errors": [],
         }

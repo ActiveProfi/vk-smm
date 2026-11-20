@@ -20,19 +20,25 @@ class RegisterForm(FlaskForm):
     username = StringField(
         "Логин",
         validators=[
-            DataRequired(),
-            Length(3, 80),
+            DataRequired(message="Впишите логин."),
+            Length(3, 80, message="Логин: от 3 до 80 символов."),
             Regexp(r"^[^\s<>\"']+$", message="В логине нельзя использовать пробелы и символы < > \" '"),
         ],
     )
     password = PasswordField(
         "Пароль",
-        validators=[DataRequired(), Length(8, 128)],
+        validators=[
+            DataRequired(message="Впишите пароль."),
+            Length(8, 128, message="Пароль: не меньше 8 символов."),
+        ],
         render_kw={"placeholder": "Не меньше 8 символов"},
     )
     password2 = PasswordField(
         "Повтор пароля",
-        validators=[DataRequired(), EqualTo("password", message="Пароли не совпадают")],
+        validators=[
+            DataRequired(message="Повторите пароль."),
+            EqualTo("password", message="Пароли не совпадают."),
+        ],
     )
     privacy_agree = BooleanField(
         "Согласен с политикой обработки персональных данных",
@@ -46,8 +52,8 @@ class RegisterForm(FlaskForm):
 
 
 class LoginForm(FlaskForm):
-    username = StringField("Логин", validators=[DataRequired()])
-    password = PasswordField("Пароль", validators=[DataRequired()])
+    username = StringField("Логин", validators=[DataRequired(message="Впишите логин.")])
+    password = PasswordField("Пароль", validators=[DataRequired(message="Впишите пароль.")])
     submit = SubmitField("Войти")
 
 
@@ -157,10 +163,23 @@ class RubricForm(FlaskForm):
             ),
         ],
     )
-    title = StringField("Название рубрики", validators=[DataRequired(), Length(2, 120)])
+    title = StringField(
+        "Название рубрики",
+        validators=[
+            DataRequired(message="Впишите название рубрики."),
+            Length(2, 120, message="Название рубрики: хотя бы 2 символа."),
+        ],
+    )
     prompt_text = TextAreaField(
         "Промпт рубрики",
-        validators=[DataRequired(), Length(20, 50000)],
+        validators=[
+            DataRequired(message="Опишите, как писать посты этой рубрики."),
+            Length(
+                20,
+                50000,
+                message="Промпт рубрики слишком короткий. Опишите правила хотя бы в 20 символах.",
+            ),
+        ],
         render_kw={"rows": 14},
     )
     sort_order = IntegerField("Порядок", default=0, validators=[Optional()])

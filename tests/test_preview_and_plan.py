@@ -150,7 +150,7 @@ def test_text_regen_sends_wish_and_keeps_picture(app, monkeypatch):
         assert saved.image_url == "https://cdn.example/keep.png"
 
 
-def test_dashboard_groups_channels(app, client):
+def test_dashboard_shows_selected_channel_only(app, client):
     owner = make_user(app, "agency-a")
     first = make_workspace(app, owner, name="Кофейня")
     second = make_workspace(app, owner, name="Студия йоги")
@@ -178,10 +178,12 @@ def test_dashboard_groups_channels(app, client):
         )
         db.session.commit()
     login(client, "agency-a")
+    client.post(f"/workspaces/{second}/select", data={"next": "drafts"})
     page = client.get("/")
     body = page.get_data(as_text=True)
     assert page.status_code == 200
-    assert "Кофейня" in body
     assert "Студия йоги" in body
+    assert "Пост йоги" in body
+    assert "Текст кофейни" not in body
     assert "Включить в текущий план" in body
     assert "Промпт для текста" not in body

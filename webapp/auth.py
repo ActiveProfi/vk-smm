@@ -125,14 +125,37 @@ def accept_privacy():
     )
 
 
-@auth_bp.route("/account")
+@auth_bp.route("/account", methods=["GET", "POST"])
 @login_required
 def account():
+    from webapp.services import access as acc
+    from webapp.services.secrets_box import seal
+    from webapp.services.user_keys import kie_is_saved
+
+    can_edit_keys = acc.membership_for(current_user) is None
+    if request.method == "POST" and request.form.get("form_action") == "kie":
+        if not can_edit_keys:
+            flash("Ключ нейросети задаёт владелец кабинета.", "warning")
+            return redirect(url_for("auth.account"))
+        raw = (request.form.get("kie_api_key") or "").strip()
+        if request.form.get("clear_kie") == "1":
+            current_user.kie_api_key = ""
+            db.session.commit()
+            flash("Ключ KIE удалён из кабинета.", "info")
+        elif raw:
+            current_user.kie_api_key = seal(raw)
+            db.session.commit()
+            flash("Ключ KIE сохранён. Он зашифрован и в файлы не записывается.", "success")
+        else:
+            flash("Поле пустое — сохранённый ключ не менялся.", "info")
+        return redirect(url_for("auth.account"))
     return render_template(
         "auth/account.html",
         policy_version=PRIVACY_POLICY_VERSION,
         accepted_at=getattr(current_user, "privacy_accepted_at", "") or "",
         accepted_version=getattr(current_user, "privacy_policy_version", "") or "",
+        kie_saved=kie_is_saved(current_user.id),
+        can_edit_keys=can_edit_keys,
     )
 
 

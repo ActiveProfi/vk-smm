@@ -13,6 +13,30 @@
   <a class="btn btn-sm btn-outline-dark" href="{{ url_for('auth.privacy') }}">Текст политики</a>
 </div>
 
+<div class="panel mb-3">
+  <h2 class="h6">Ключ нейросети (KIE)</h2>
+  <p class="small text-muted">
+    Нужен для текстов, картинок и контент-плана.
+    Токен группы ВК вписывается отдельно: «Каналы» → канал → «Настройки».
+    {% if kie_saved %}Ключ KIE уже сохранён в кабинете.{% else %}Ключ KIE ещё не задан.{% endif %}
+  </p>
+  {% if can_edit_keys %}
+  <form method="post" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="form_action" value="kie">
+    <label class="form-label small" for="kie-key">Ключ KIE</label>
+    <input class="form-control mb-2" type="password" name="kie_api_key" id="kie-key" autocomplete="new-password" placeholder="Оставьте пустым, чтобы не менять">
+    <div class="form-check mb-2">
+      <input class="form-check-input" type="checkbox" name="clear_kie" value="1" id="clear-kie">
+      <label class="form-check-label small" for="clear-kie">Удалить сохранённый ключ</label>
+    </div>
+    <button type="submit" class="btn btn-accent btn-sm">Сохранить ключ</button>
+  </form>
+  {% else %}
+  <p class="small mb-0">Ключ задаёт владелец кабинета в этом же разделе.</p>
+  {% endif %}
+</div>
+
 <div class="row g-3">
   <div class="col-md-6">
     <div class="panel h-100">

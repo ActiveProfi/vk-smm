@@ -188,6 +188,18 @@ def create_app(test_config: dict | None = None) -> Flask:
         return None
 
     @app.before_request
+    def bind_cabinet_keys():
+        if not current_user.is_authenticated:
+            return None
+        try:
+            from webapp.services.user_keys import bind
+
+            bind(current_user.id)
+        except Exception:
+            pass
+        return None
+
+    @app.before_request
     def require_privacy_consent():
         """Без согласия с текущей политикой кабинет не открываем. Удаление данных доступно."""
         if not current_user.is_authenticated or app.config.get("DEV_SKIP_AUTH"):
@@ -216,6 +228,28 @@ def create_app(test_config: dict | None = None) -> Flask:
         if current_user.is_authenticated:
             ensure_default_workspace_for_user(current_user)
             role = acc.role_for_user(current_user)
+            endpoint = request.endpoint or ""
+            if endpoint.startswith("smm.ads"):
+                nav_section = "ads"
+            else:
+                nav_section = {
+                    "smm.calendar": "calendar",
+                    "smm.stats": "stats",
+                    "smm.generation_queue": "queue",
+                    "smm.dashboard": "drafts",
+                    "smm.month_report": "report",
+                    "smm.month_report_excel": "report",
+                    "smm.month_report_pdf": "report",
+                    "smm.client_approvals": "approvals",
+                    "smm.generate": "generate",
+                    "smm.preview": "drafts",
+                    "smm.manager_panel": "dashboard",
+                    "workspaces.list_workspaces": "channels",
+                    "workspaces.edit_workspace": "channels",
+                    "workspaces.create_workspace": "channels",
+                    "workspaces.rubrics": "channels",
+                    "workspaces.content_plan": "content_plan",
+                }.get(endpoint, "content_plan")
             nav_workspaces = []
             try:
                 nav_workspaces = list(acc.list_workspaces(current_user, active_only=True).limit(40))
@@ -229,6 +263,10 @@ def create_app(test_config: dict | None = None) -> Flask:
                 "user_role": acc.ROLE_LABELS.get(role, role),
                 "user_role_code": role,
                 "can_manage_team": acc.can(current_user, "team"),
+                "can_create_channel": acc.can(current_user, "workspace_create"),
+                "can_open_billing": acc.can(current_user, "billing"),
+                "can_generate_posts": acc.can(current_user, "generate"),
+                "nav_section": nav_section,
             }
         return {
             "active_workspace": None,
@@ -238,6 +276,10 @@ def create_app(test_config: dict | None = None) -> Flask:
             "user_role": "",
             "user_role_code": "",
             "can_manage_team": False,
+            "can_create_channel": False,
+            "can_open_billing": False,
+            "can_generate_posts": False,
+            "nav_section": "content_plan",
         }
 
     from webapp.services.post_format import render_vk_post_html
