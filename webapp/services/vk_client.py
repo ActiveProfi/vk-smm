@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 from urllib import parse, request
@@ -35,13 +36,13 @@ def resolve_token_and_group(
     group_id = (user_group_id or "").strip() or os.environ.get("VK_GROUP_ID", "").strip()
     if not token:
         raise ValueError(
-            "Не задан VK-токен. Вставьте его в настройках канала "
-            "или добавьте VK_USER_TOKEN в файл .env"
+            "Не задан токен ВК. Откройте «Каналы» → нужный канал → «Настройки» "
+            "и вставьте токен группы."
         )
     if not group_id:
         raise ValueError(
-            "Не задан ID группы ВК. Укажите его в настройках канала "
-            "или добавьте VK_GROUP_ID в файл .env"
+            "Не задан номер группы ВК. Откройте «Каналы» → нужный канал → «Настройки» "
+            "и впишите ID группы."
         )
     # ID группы может прийти как club123 / -123 / 123
     group_id = str(group_id).strip()
@@ -71,8 +72,8 @@ def test_connection(*, user_token: str = "", user_group_id: str = "") -> dict:
         group_id = group_id[1:]
     if not group_id:
         raise ValueError(
-            "Не задан ID группы ВК. Укажите его в настройках канала "
-            "или добавьте VK_GROUP_ID в файл .env"
+            "Не задан номер группы ВК. Откройте «Каналы» → нужный канал → «Настройки» "
+            "и впишите ID группы."
         )
 
     candidates: list[tuple[str, str]] = []
@@ -89,8 +90,8 @@ def test_connection(*, user_token: str = "", user_group_id: str = "") -> dict:
 
     if not candidates:
         raise ValueError(
-            "Не задан VK-токен. Вставьте его в настройках канала "
-            "или добавьте VK_USER_TOKEN / VK_COMMUNITY_TOKEN в .env"
+            "Не задан токен ВК. Откройте «Каналы» → нужный канал → «Настройки» "
+            "и вставьте токен группы."
         )
 
     last_error: Exception | None = None
@@ -197,8 +198,8 @@ def _friendly_vk_error(error: dict) -> str:
     if code == 5 and "ip address" in msg.lower():
         return (
             "Токен привязан к другому IP (выдан с другого компьютера/сети). "
-            "Получите новый токен пользователя с правом offline и вставьте его "
-            "в настройки канала или в .env (VK_USER_TOKEN)."
+            "Получите новый токен с правом offline и вставьте его "
+            "в «Каналы» → этот канал → «Настройки»."
         )
     if code == 5:
         return f"Токен ВК недействителен или отозван. Получите новый. Детали: {msg}"
@@ -229,32 +230,50 @@ def _vk_call_with_token(method: str, params: dict, token: str) -> dict:
     return data["response"]
 
 
+def _read_local_media(url: str) -> tuple[bytes, str]:
+    """Файл из /media/<id>/<путь> в папке загрузок кабинета."""
+    import mimetypes
+    from pathlib import Path
+
+    from flask import current_app
+
+    match = re.match(r"^/media/(\d+)/(.+)$", (url or "").strip())
+    if not match:
+        raise RuntimeError("Не удалось найти файл картинки на сервере.")
+    root = (Path(current_app.config["UPLOAD_FOLDER"]) / match.group(1)).resolve()
+    full = (root / match.group(2)).resolve()
+    if root != full and root not in full.parents:
+        raise RuntimeError("Некорректный путь файла.")
+    if not full.is_file():
+        raise RuntimeError("Файл картинки не найден. Загрузите его ещё раз.")
+    ctype = mimetypes.guess_type(full.name)[0] or "image/jpeg"
+    return full.read_bytes(), ctype
+
+
 def publish_draft(
     *,
     post_text: str,
     image_url: str = "",
     video_url: str = "",
+    extra_image_urls: list[str] | None = None,
     topic: str = "",
     user_token: str = "",
     user_group_id: str = "",
 ) -> dict:
-    """Публикует пост с визуалом в сообщество."""
+    """Публикует пост в сообщество: текст, картинки (в том числе карусель) или видео."""
     token, group_id = _env_token_and_group(user_token, user_group_id)
     vk_message = prepare_post_text_for_vk(post_text)
+    images: list[str] = []
+    for raw in [image_url, *(extra_image_urls or [])]:
+        url = (raw or "").strip()
+        if url and url not in images:
+            images.append(url)
+    video = (video_url or "").strip()
 
-    # Временно подставляем токен пользователя в окружение для функций upload_*
     prev_user = os.environ.get("VK_USER_TOKEN")
     os.environ["VK_USER_TOKEN"] = token
     try:
-        draft = {
-            "post_text": vk_message,
-            "image_url": image_url or "",
-            "video_url": video_url or "",
-            "topic": topic or "",
-            "output_files": {},
-        }
-        if not (image_url or video_url):
-            # Текст без визуала — только если очень нужно для теста; правило проекта — с визуалом
+        if not images and not video:
             owner_id = f"-{group_id}"
             return _vk_call_with_token(
                 "wall.post",
@@ -265,8 +284,39 @@ def publish_draft(
                 },
                 token,
             )
-        attachments = vk_pub.build_attachments_for_draft(draft, group_id)
-        return vk_pub.publish_wall_post(group_id, vk_message, attachments)
+
+        parts: list[str] = []
+        http_images = [url for url in images if url.startswith("http://") or url.startswith("https://")]
+        local_images = [url for url in images if url.startswith("/media/")]
+        if http_images or (video and video.startswith("http")):
+            draft = {
+                "post_text": vk_message,
+                "image_url": http_images[0] if http_images else "",
+                "video_url": video if video.startswith("http") else "",
+                "topic": topic or "",
+                "output_files": {"carousel_image_urls": http_images[1:]},
+            }
+            if draft["image_url"] or draft["video_url"]:
+                parts.extend(
+                    part
+                    for part in vk_pub.build_attachments_for_draft(draft, group_id).split(",")
+                    if part
+                )
+        elif video and not video.startswith("http") and not video.startswith("/media/"):
+            raise RuntimeError(
+                "Ссылка на видео должна начинаться с http. Сгенерируйте ролик ещё раз."
+            )
+        for local in local_images:
+            content, ctype = _read_local_media(local)
+            parts.append(vk_pub.upload_photo_bytes(content, ctype, group_id))
+        if video.startswith("/media/"):
+            raise RuntimeError(
+                "Локальное видео ВК принимает только по ссылке http. "
+                "Сгенерируйте видео-анимацию или клип — ссылка появится сама."
+            )
+        if not parts:
+            raise RuntimeError("Не удалось собрать вложения для поста ВК.")
+        return vk_pub.publish_wall_post(group_id, vk_message, ",".join(parts))
     finally:
         if prev_user is None:
             os.environ.pop("VK_USER_TOKEN", None)
@@ -274,60 +324,205 @@ def publish_draft(
             os.environ["VK_USER_TOKEN"] = prev_user
 
 
-def get_stats(*, user_token: str = "", user_group_id: str = "") -> dict:
+def get_stats(
+    *,
+    user_token: str = "",
+    user_group_id: str = "",
+    posts_limit: int = 30,
+    days: int = 7,
+) -> dict:
     """
-    Собирает простую статистику: подписчики, и по возможности просмотры/лайки.
+    Статистика канала для кабинета:
+    - подписчики;
+    - сумма лайков / комментариев / репостов / просмотров по последним постам;
+    - топ постов;
+    - по дням (stats.get), если токен позволяет.
     """
+    from datetime import datetime
+
     token, group_id = _env_token_and_group(user_token, user_group_id)
-    result = {
+    posts_limit = max(5, min(int(posts_limit or 30), 100))
+    days = max(1, min(int(days or 7), 30))
+
+    result: dict = {
         "group_id": group_id,
+        "group_name": "",
         "members_count": None,
-        "reach": None,
-        "likes": None,
-        "views": None,
+        "posts_limit": posts_limit,
+        "posts_analyzed": 0,
+        "likes": 0,
+        "comments": 0,
+        "reposts": 0,
+        "views": 0,
+        "avg_views": None,
+        "avg_likes": None,
+        "best_post": None,
+        "top_by_views": [],
+        "top_by_engagement": [],
+        "recent_posts": [],
+        "daily": [],
+        "reach_today": None,
+        "visitors_period": None,
+        "views_period": None,
         "notes": [],
+        "warnings": [],
     }
 
+    # Название группы
     try:
-        members = _vk_call_with_token(
-            "groups.getMembers",
-            {"group_id": group_id, "count": 0},
+        groups = _vk_call_with_token(
+            "groups.getById",
+            {"group_id": group_id, "fields": "members_count"},
             token,
         )
-        result["members_count"] = members.get("count")
+        if isinstance(groups, list) and groups:
+            g0 = groups[0]
+            result["group_name"] = (g0.get("name") or "").strip()
+            if g0.get("members_count") is not None:
+                result["members_count"] = g0.get("members_count")
     except Exception as exc:  # noqa: BLE001
-        result["notes"].append(f"Подписчики: {exc}")
+        result["notes"].append(f"Название группы: {exc}")
 
+    if result["members_count"] is None:
+        try:
+            members = _vk_call_with_token(
+                "groups.getMembers",
+                {"group_id": group_id, "count": 0},
+                token,
+            )
+            result["members_count"] = members.get("count")
+        except Exception as exc:  # noqa: BLE001
+            result["warnings"].append(
+                "Не удалось получить число подписчиков. Проверьте токен и ID группы."
+            )
+            result["notes"].append(f"Подписчики: {exc}")
+
+    # Посты стены
     try:
-        # Последние посты стены — для суммарных лайков/просмотров
         wall = _vk_call_with_token(
             "wall.get",
-            {"owner_id": f"-{group_id}", "count": 10},
+            {"owner_id": f"-{group_id}", "count": posts_limit, "filter": "owner"},
             token,
         )
         items = wall.get("items") or []
-        likes = 0
-        views = 0
+        posts: list[dict] = []
         for item in items:
-            likes += (item.get("likes") or {}).get("count", 0)
-            views += (item.get("views") or {}).get("count", 0)
-        result["likes"] = likes
-        result["views"] = views
-        result["notes"].append(f"Лайки и просмотры — сумма по последним {len(items)} постам.")
+            if not isinstance(item, dict):
+                continue
+            # пропускаем репосты чужих записей как «свои» метрики публикации
+            if item.get("copy_history"):
+                continue
+            likes = int((item.get("likes") or {}).get("count") or 0)
+            comments = int((item.get("comments") or {}).get("count") or 0)
+            reposts = int((item.get("reposts") or {}).get("count") or 0)
+            views = int((item.get("views") or {}).get("count") or 0)
+            engagement = likes + comments + reposts
+            text = (item.get("text") or "").replace("\n", " ").strip()
+            if len(text) > 120:
+                text = text[:117].rstrip() + "…"
+            if not text:
+                text = "(без текста — только визуал)"
+            date_ts = int(item.get("date") or 0)
+            date_label = (
+                datetime.fromtimestamp(date_ts).strftime("%d.%m.%Y %H:%M")
+                if date_ts
+                else "—"
+            )
+            post_id = item.get("id")
+            link = (
+                f"https://vk.com/wall-{group_id}_{post_id}"
+                if post_id is not None
+                else ""
+            )
+            posts.append(
+                {
+                    "id": post_id,
+                    "date": date_label,
+                    "date_ts": date_ts,
+                    "text": text,
+                    "likes": likes,
+                    "comments": comments,
+                    "reposts": reposts,
+                    "views": views,
+                    "engagement": engagement,
+                    "link": link,
+                }
+            )
+
+        result["posts_analyzed"] = len(posts)
+        result["likes"] = sum(p["likes"] for p in posts)
+        result["comments"] = sum(p["comments"] for p in posts)
+        result["reposts"] = sum(p["reposts"] for p in posts)
+        result["views"] = sum(p["views"] for p in posts)
+        if posts:
+            result["avg_views"] = round(result["views"] / len(posts))
+            result["avg_likes"] = round(result["likes"] / len(posts), 1)
+            result["best_post"] = max(posts, key=lambda p: (p["views"], p["engagement"]))
+            result["top_by_views"] = sorted(
+                posts, key=lambda p: (p["views"], p["engagement"]), reverse=True
+            )[:5]
+            result["top_by_engagement"] = sorted(
+                posts, key=lambda p: (p["engagement"], p["views"]), reverse=True
+            )[:5]
+            result["recent_posts"] = posts[:15]
+        result["notes"].append(
+            f"Метрики постов — по последним {len(posts)} записям со стены сообщества."
+        )
     except Exception as exc:  # noqa: BLE001
+        result["warnings"].append(
+            "Не удалось прочитать стену. Нужен токен с доступом к стене группы."
+        )
         result["notes"].append(f"Стена: {exc}")
 
+    # Статистика сообщества по дням (часто нужен токен администратора)
     try:
         stats = _vk_call_with_token(
             "stats.get",
-            {"group_id": group_id, "interval": "day", "intervals_count": 1},
+            {
+                "group_id": group_id,
+                "interval": "day",
+                "intervals_count": days,
+            },
             token,
         )
-        if isinstance(stats, list) and stats:
-            day = stats[-1]
-            visitors = day.get("visitors") or {}
-            result["reach"] = visitors.get("views") or visitors.get("visitors")
+        daily: list[dict] = []
+        views_sum = 0
+        visitors_sum = 0
+        if isinstance(stats, list):
+            for day in stats:
+                if not isinstance(day, dict):
+                    continue
+                visitors = day.get("visitors") or {}
+                day_views = int(visitors.get("views") or 0)
+                day_visitors = int(visitors.get("visitors") or 0)
+                period_from = day.get("period_from") or day.get("day") or ""
+                if isinstance(period_from, int):
+                    label = datetime.fromtimestamp(period_from).strftime("%d.%m")
+                else:
+                    label = str(period_from)[-5:] if period_from else "—"
+                daily.append(
+                    {
+                        "label": label,
+                        "views": day_views,
+                        "visitors": day_visitors,
+                    }
+                )
+                views_sum += day_views
+                visitors_sum += day_visitors
+        result["daily"] = daily
+        result["views_period"] = views_sum
+        result["visitors_period"] = visitors_sum
+        if daily:
+            result["reach_today"] = daily[-1].get("views")
+            result["notes"].append(
+                f"Охват сообщества — stats.get за последние {len(daily)} дн."
+            )
     except Exception as exc:  # noqa: BLE001
+        result["warnings"].append(
+            "Охват по дням недоступен с этим токеном "
+            "(нужны права администратора сообщества на статистику). "
+            "Цифры по постам выше всё равно считаются."
+        )
         result["notes"].append(f"stats.get: {exc}")
 
     return result

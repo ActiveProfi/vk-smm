@@ -22,7 +22,10 @@ STEP_LABELS = {
     "content_plan": "ИИ-маркетолог составляет план…",
     "visual_prepare": "Идёт генерация визуала…",
     "image_gpt_image_2": "Идёт генерация визуала…",
-    "video_kling": "Идёт генерация визуала…",
+    "video_kling": "Идёт генерация визуала… Kling",
+    "video_minimax": "Идёт генерация визуала… MiniMax",
+    "video_veo": "Идёт генерация визуала… Veo",
+    "video_hailuo": "Идёт генерация визуала… Hailuo",
     "save_draft": "Сохранение черновика…",
     "done": "Готово",
     "error": "Ошибка",
@@ -38,6 +41,9 @@ STEP_PERCENTS = {
     "visual_prepare": 52,
     "image_gpt_image_2": 65,
     "video_kling": 82,
+    "video_minimax": 82,
+    "video_veo": 82,
+    "video_hailuo": 82,
     "save_draft": 95,
     "done": 100,
     "error": 100,
@@ -48,8 +54,23 @@ def _job_path(job_id: str) -> Path:
     return _JOBS_DIR / f"{job_id}.json"
 
 
+_SECRET_PAYLOAD_KEYS = {
+    "vk_token",
+    "vk_ads_token",
+    "vk_ads_client_secret",
+    "vk_ads_refresh_token",
+    "client_secret",
+    "password",
+    "access_token",
+    "refresh_token",
+}
+
+
 def _persist(job: dict) -> None:
-    """Сохраняем статус на диск (чтобы не терять при опросе)."""
+    """Сохраняем статус на диск (чтобы не терять при опросе). Секреты в файл не пишем."""
+    payload = dict(job.get("payload") or {})
+    for key in _SECRET_PAYLOAD_KEYS:
+        payload.pop(key, None)
     public = {
         "id": job["id"],
         "user_id": job["user_id"],
@@ -63,7 +84,7 @@ def _persist(job: dict) -> None:
         "image_url": job.get("image_url") or "",
         "plan_items": job.get("plan_items") or [],
         "plan_meta": job.get("plan_meta") or {},
-        "payload": job.get("payload") or {},
+        "payload": payload,
         "log": list(job.get("log") or [])[-20:],
         "updated_at": job.get("updated_at"),
     }
@@ -102,6 +123,11 @@ def update_job(job_id: str, **fields) -> None:
         job = _JOBS.get(job_id)
         if not job:
             return
+        from webapp.services.http_guard import scrub_secrets
+
+        for key in ("message", "error", "warning"):
+            if key in fields and isinstance(fields[key], str):
+                fields[key] = scrub_secrets(fields[key])
         job.update(fields)
         job["updated_at"] = time.time()
         step = fields.get("step")
@@ -206,7 +232,10 @@ def make_progress_callback(job_id: str) -> Callable[[str, str | None], None]:
             job = _JOBS.get(job_id)
             if (
                 job
-                and step in ("visual_prepare", "image_gpt_image_2", "video_kling")
+                and (
+                    step in ("visual_prepare", "image_gpt_image_2")
+                    or str(step).startswith("video_")
+                )
                 and message
                 and "прошло" in message
             ):
@@ -220,3 +249,21 @@ def make_progress_callback(job_id: str) -> Callable[[str, str | None], None]:
         )
 
     return _cb
+
+
+def purge_old_jobs(max_age_sec: int = 24 * 60 * 60) -> int:
+    """Удалить старые файлы заданий: в них бывают тексты постов и материалы."""
+    removed = 0
+    now = time.time()
+    try:
+        files = list(_JOBS_DIR.glob("*.json"))
+    except OSError:
+        return 0
+    for path in files:
+        try:
+            if now - path.stat().st_mtime > max_age_sec:
+                path.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed

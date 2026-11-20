@@ -11,6 +11,13 @@ from flask_login import current_user, login_required
 from webapp.forms import RubricForm, SwitchWorkspaceForm, WorkspaceForm
 from webapp.models import Draft, Rubric, Workspace, db
 from webapp.services import vk_client
+from webapp.services import vk_ads_client
+from webapp.services import access as acc
+from webapp.services.http_guard import scrub_secrets
+from webapp.services.publish_formats import choices as pf_choices
+from webapp.services.publish_formats import label as pf_label
+from webapp.services.publish_formats import normalize_format as pf_code
+from webapp.services.secrets_box import reveal, seal
 from webapp.services import materials_bag
 from webapp.services import workspace_visual as ws_visual
 from webapp.services import workspace_ai as ws_ai
@@ -26,8 +33,47 @@ from webapp.workspace_seed import (
 workspaces_bp = Blueprint("workspaces", __name__, url_prefix="/workspaces")
 
 
+def _sample_plan_if_requested():
+    """Только для скриншота черновика плана, пока включён вход без пароля."""
+    from flask import current_app, request
+
+    if not current_app.config.get("DEV_SKIP_AUTH"):
+        return []
+    if (request.args.get("sample") or "") != "1":
+        return []
+    return [
+        {
+            "date": "2026-11-02",
+            "time": "10:00",
+            "topic": "Как выбрать зерно к утру",
+            "rubric_title": "Экспертный пост",
+            "rubric_code": "expert",
+            "format": "image",
+            "note": "коротко и по делу",
+        },
+        {
+            "date": "2026-11-03",
+            "time": "18:30",
+            "topic": "Пар над чашкой",
+            "rubric_title": "Кейс",
+            "rubric_code": "case",
+            "format": "animation",
+            "note": "короткий ролик",
+        },
+        {
+            "date": "2026-11-04",
+            "time": "12:00",
+            "topic": "Три напитка недели",
+            "rubric_title": "Чек-лист",
+            "rubric_code": "checklist",
+            "format": "carousel",
+            "note": "три кадра",
+        },
+    ]
+
+
 def _user_workspace(workspace_id: int) -> Workspace:
-    return Workspace.query.filter_by(id=workspace_id, user_id=current_user.id).first_or_404()
+    return acc.get_workspace_or_404(current_user, workspace_id)
 
 
 def _visual_refs_for_template(ws: Workspace | None) -> list[dict]:
@@ -56,6 +102,8 @@ def _run_style_preview_job(app, job_id: str, payload: dict) -> None:
                 visual_style_prompt=payload.get("visual_style_prompt") or "",
                 brand_site=payload.get("brand_site") or "",
                 reference_image_urls=payload.get("reference_image_urls") or [],
+                reference_local_files=payload.get("reference_local_files") or [],
+                reference_image_names=payload.get("reference_image_names") or [],
                 on_progress=progress,
             )
             ws = db.session.get(Workspace, ws_id)
@@ -115,11 +163,7 @@ def _vk_status_for_workspace(ws: Workspace | None) -> dict:
 @login_required
 def list_workspaces():
     ensure_default_workspace_for_user(current_user)
-    items = (
-        Workspace.query.filter_by(user_id=current_user.id)
-        .order_by(Workspace.id.asc())
-        .all()
-    )
+    items = list(acc.list_workspaces(current_user, active_only=False))
     switch_form = SwitchWorkspaceForm()
     active_ws = next((w for w in items if w.id == current_user.active_workspace_id), None)
     return render_template(
@@ -128,6 +172,8 @@ def list_workspaces():
         active_id=current_user.active_workspace_id,
         active_ws=active_ws,
         switch_form=switch_form,
+        user_role=acc.ROLE_LABELS.get(acc.role_for_user(current_user), ""),
+        can_create=acc.can(current_user, "workspace_create"),
     )
 
 
@@ -161,13 +207,20 @@ def select_workspace(workspace_id: int):
         )
 
     nxt = (request.form.get("next") or request.args.get("next") or "content_plan").strip()
-    if nxt == "generate":
-        return redirect(url_for("smm.generate"))
-    if nxt == "channels":
-        return redirect(url_for("workspaces.list_workspaces"))
-    if nxt == "drafts":
-        return redirect(url_for("smm.dashboard"))
-    return redirect(url_for("workspaces.content_plan", workspace_id=ws.id))
+    stay = {
+        "generate": url_for("smm.generate"),
+        "channels": url_for("workspaces.list_workspaces"),
+        "drafts": url_for("smm.dashboard"),
+        "calendar": url_for("smm.calendar"),
+        "stats": url_for("smm.stats"),
+        "queue": url_for("smm.generation_queue"),
+        "report": url_for("smm.month_report", workspace_id=ws.id),
+        "approvals": url_for("smm.client_approvals", workspace_id=ws.id),
+        "ads": url_for("smm.ads_cabinets"),
+        "dashboard": url_for("smm.manager_panel"),
+        "content_plan": url_for("workspaces.content_plan", workspace_id=ws.id),
+    }
+    return redirect(stay.get(nxt, stay["content_plan"]))
 
 
 @workspaces_bp.route("/switch", methods=["POST"])
@@ -186,12 +239,32 @@ def switch_workspace():
 @workspaces_bp.route("/new", methods=["GET", "POST"])
 @login_required
 def create_workspace():
+    if not acc.can(current_user, "workspace_create"):
+        flash("Создавать каналы может только владелец кабинета.", "warning")
+        return redirect(url_for("workspaces.list_workspaces"))
     form = WorkspaceForm()
     if form.validate_on_submit():
         from webapp.services import business as biz
 
+        owner_id = acc.agency_owner_id(current_user)
+        from webapp.services.channel_care import name_taken
+
+        if name_taken(owner_id, form.name.data or ""):
+            flash(
+                "Канал с таким названием уже есть. Добавьте тематику в название, чтобы не перепутать.",
+                "warning",
+            )
+            return render_template(
+                "workspaces/edit.html",
+                form=form,
+                workspace=None,
+                vk_status=_vk_status_for_workspace(None),
+                visual_refs=[],
+                package_status=None,
+                client_approve_url="",
+            )
         ws = Workspace(
-            user_id=current_user.id,
+            user_id=owner_id,
             name=form.name.data.strip(),
             theme=(form.theme.data or "").strip(),
             description=(form.description.data or "").strip(),
@@ -199,8 +272,10 @@ def create_workspace():
             search_hint=(form.search_hint.data or "").strip(),
             knowledge_text=(form.knowledge_text.data or "").strip(),
             visual_style_prompt=(form.visual_style_prompt.data or "").strip(),
-            vk_token=(form.vk_token.data or "").strip(),
+            vk_token=seal((form.vk_token.data or "").strip()),
             vk_group_id=(form.vk_group_id.data or "").strip(),
+            vk_ads_token=seal((form.vk_ads_token.data or "").strip()),
+            vk_ads_account_id=(form.vk_ads_account_id.data or "").strip(),
             is_active=True,
         )
         db.session.add(ws)
@@ -238,16 +313,28 @@ def create_workspace():
 @login_required
 def edit_workspace(workspace_id: int):
     ws = _user_workspace(workspace_id)
+    if not acc.can(current_user, "workspace_settings", ws):
+        flash("Недостаточно прав для настройки канала.", "warning")
+        return redirect(url_for("workspaces.list_workspaces"))
     from webapp.services import business as biz
 
     form = WorkspaceForm(obj=ws)
     if request.method == "GET":
         # Не показываем токен в password-поле при открытии формы
         form.vk_token.data = ""
+        form.vk_ads_token.data = ""
         if hasattr(form, "seed_mode"):
             form.seed_mode.data = "empty"
 
     if form.validate_on_submit():
+        from webapp.services.channel_care import name_taken
+
+        if name_taken(ws.user_id, form.name.data or "", exclude_id=ws.id):
+            flash(
+                "Канал с таким названием уже есть. Добавьте тематику в название, чтобы не перепутать.",
+                "warning",
+            )
+            return redirect(url_for("workspaces.edit_workspace", workspace_id=ws.id))
         ws.name = form.name.data.strip()
         ws.theme = (form.theme.data or "").strip()
         ws.description = (form.description.data or "").strip()
@@ -257,8 +344,12 @@ def edit_workspace(workspace_id: int):
         ws.visual_style_prompt = (form.visual_style_prompt.data or "").strip()
         new_token = (form.vk_token.data or "").strip()
         if new_token:
-            ws.vk_token = new_token
+            ws.vk_token = seal(new_token)
         ws.vk_group_id = (form.vk_group_id.data or "").strip()
+        new_ads_token = (form.vk_ads_token.data or "").strip()
+        if new_ads_token:
+            ws.vk_ads_token = seal(new_ads_token)
+        ws.vk_ads_account_id = (form.vk_ads_account_id.data or "").strip()
         old_code = (ws.package_code or "").strip()
         biz.apply_package_fields(
             ws,
@@ -304,6 +395,9 @@ def edit_workspace(workspace_id: int):
 def upload_visual_ref(workspace_id: int):
     """Загрузка референсных картинок стиля для канала."""
     ws = _user_workspace(workspace_id)
+    denied = acc.guard("workspace_settings", ws)
+    if denied:
+        return denied
     files = request.files.getlist("reference_uploads")
     if not files or all(not f.filename for f in files):
         return jsonify({"ok": False, "error": "Выберите изображения."}), 400
@@ -329,7 +423,11 @@ def upload_visual_ref(workspace_id: int):
         stamp = int(datetime.utcnow().timestamp() * 1000)
         safe_name = safe_storage_name(display_name)
         path = upload_dir / f"{stamp}_{safe_name}"
-        f.save(path)
+        try:
+            path = ws_visual.save_uploaded_reference(f, path)
+        except ValueError as exc:
+            skipped.append(f"{display_name}: {exc}")
+            continue
         relative = f"workspace/{ws.id}/refs/{path.name}"
         item = ws_visual.add_reference_image(ws, name=display_name, relative_path=relative)
         item["url"] = url_for("smm.media_file", user_id=current_user.id, filename=relative)
@@ -352,6 +450,9 @@ def upload_visual_ref(workspace_id: int):
 @login_required
 def delete_visual_ref(workspace_id: int, ref_id: str):
     ws = _user_workspace(workspace_id)
+    denied = acc.guard("workspace_settings", ws)
+    if denied:
+        return denied
     removed = ws_visual.remove_reference_image(ws, ref_id)
     if not removed:
         return jsonify({"ok": False, "error": "Референс не найден."}), 404
@@ -374,13 +475,26 @@ def delete_visual_ref(workspace_id: int, ref_id: str):
 def start_style_preview(workspace_id: int):
     """Генерация примера картинки для утверждения стиля канала."""
     ws = _user_workspace(workspace_id)
+    denied = acc.guard("workspace_settings", ws)
+    if denied:
+        return denied
     data = request.get_json(silent=True) or {}
-    visual_style_prompt = (
-        (data.get("visual_style_prompt") or "").strip()
-        or (ws.visual_style_prompt or "").strip()
-    )
+    form_style = (data.get("visual_style_prompt") or "").strip()
+    db_style = (ws.visual_style_prompt or "").strip()
+    # Пустое/короткое поле на странице → берём сохранённый стиль канала
+    if len(form_style) < 10:
+        visual_style_prompt = db_style
+    else:
+        visual_style_prompt = form_style
     name = (data.get("name") or ws.name or "").strip()
     refs = ws_visual.load_reference_images(ws)
+    upload_root = Path(current_app.config["UPLOAD_FOLDER"])
+    local_files = ws_visual.resolve_reference_local_files(
+        upload_root, current_user.id, refs
+    )
+    ref_names = [
+        (r.get("name") or "").strip() for r in refs if (r.get("name") or "").strip()
+    ]
     payload = {
         "kind": "style_preview",
         "workspace_id": ws.id,
@@ -390,12 +504,17 @@ def start_style_preview(workspace_id: int):
         "visual_style_prompt": visual_style_prompt,
         "brand_site": (data.get("brand_site") or ws.brand_site or "").strip(),
         "reference_image_urls": ws_visual.build_media_urls(current_user.id, refs),
+        "reference_local_files": local_files,
+        "reference_image_names": ref_names,
     }
     if len(visual_style_prompt) < 10:
         return jsonify(
             {
                 "ok": False,
-                "error": "Сначала заполните промпт визуального стиля (или сгенерируйте его кнопкой «ИИ генерация»).",
+                "error": (
+                    "Промпт визуального стиля пустой. Заполните поле выше, "
+                    "нажмите «Сохранить канал», затем снова «Сгенерировать пример»."
+                ),
             }
         ), 400
 
@@ -413,6 +532,9 @@ def start_style_preview(workspace_id: int):
 @login_required
 def ai_generate_field():
     """ИИ-генерация или улучшение полей настроек канала."""
+    denied = acc.guard("workspace_settings")
+    if denied:
+        return denied
     data = request.get_json(silent=True) or {}
     field = (data.get("field") or "").strip()
     name = (data.get("name") or "").strip()
@@ -482,7 +604,7 @@ def ai_generate_field():
             }
         )
     except Exception as exc:  # noqa: BLE001
-        return jsonify({"ok": False, "error": str(exc)}), 400
+        return jsonify({"ok": False, "error": scrub_secrets(str(exc))}), 400
 
 
 @workspaces_bp.route("/<int:workspace_id>/ai-generate-rubric", methods=["POST"])
@@ -490,6 +612,9 @@ def ai_generate_field():
 def ai_generate_rubric(workspace_id: int):
     """ИИ-генерация или улучшение промпта рубрики."""
     ws = _user_workspace(workspace_id)
+    denied = acc.guard("workspace_settings", ws)
+    if denied:
+        return denied
     data = request.get_json(silent=True) or {}
     try:
         text = ws_ai.generate_rubric_prompt(
@@ -504,7 +629,7 @@ def ai_generate_rubric(workspace_id: int):
         improved = bool((data.get("current_text") or "").strip())
         return jsonify({"ok": True, "text": text, "improved": improved})
     except Exception as exc:  # noqa: BLE001
-        return jsonify({"ok": False, "error": str(exc)}), 400
+        return jsonify({"ok": False, "error": scrub_secrets(str(exc))}), 400
 
 
 @workspaces_bp.route("/<int:workspace_id>/test-vk", methods=["POST"])
@@ -512,21 +637,27 @@ def ai_generate_rubric(workspace_id: int):
 def test_vk(workspace_id: int):
     """Проверка токена и группы (из формы или уже сохранённых данных)."""
     ws = _user_workspace(workspace_id)
+    denied = acc.guard("workspace_settings", ws)
+    if denied:
+        return denied
     data = request.get_json(silent=True) or {}
     # Можно передать черновик из полей формы до сохранения
-    token = (data.get("vk_token") or "").strip() or (ws.vk_token or "")
+    token = (data.get("vk_token") or "").strip() or reveal(ws.vk_token)
     group_id = (data.get("vk_group_id") or "").strip() or (ws.vk_group_id or "")
     try:
         result = vk_client.test_connection(user_token=token, user_group_id=group_id)
         return jsonify({"ok": True, **result})
     except Exception as exc:  # noqa: BLE001
-        return jsonify({"ok": False, "error": str(exc)}), 400
+        return jsonify({"ok": False, "error": scrub_secrets(str(exc))}), 400
 
 
 @workspaces_bp.route("/test-vk-new", methods=["POST"])
 @login_required
 def test_vk_new():
     """Проверка при создании нового канала (ещё нет id)."""
+    denied = acc.guard("workspace_create")
+    if denied:
+        return denied
     data = request.get_json(silent=True) or {}
     token = (data.get("vk_token") or "").strip()
     group_id = (data.get("vk_group_id") or "").strip()
@@ -534,8 +665,50 @@ def test_vk_new():
         result = vk_client.test_connection(user_token=token, user_group_id=group_id)
         return jsonify({"ok": True, **result})
     except Exception as exc:  # noqa: BLE001
-        return jsonify({"ok": False, "error": str(exc)}), 400
+        return jsonify({"ok": False, "error": scrub_secrets(str(exc))}), 400
 
+
+@workspaces_bp.route("/<int:workspace_id>/test-ads", methods=["POST"])
+@login_required
+def test_ads(workspace_id: int):
+    """Проверка токена VK Реклама для канала."""
+    ws = _user_workspace(workspace_id)
+    denied = acc.guard("workspace_settings", ws)
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    token = (data.get("vk_ads_token") or "").strip() or reveal(ws.vk_ads_token)
+    try:
+        result = vk_ads_client.test_connection(token=token)
+        fresh = (result.get("access_token") or "").strip()
+        if fresh and (
+            (ws.vk_ads_token or "").strip()
+            or not (data.get("vk_ads_token") or "").strip()
+        ):
+            # Обновлённый токен из .env/refresh — сохраним в канал, если канал уже был привязан
+            if (ws.vk_ads_token or "").strip() and fresh != reveal(ws.vk_ads_token):
+                ws.vk_ads_token = seal(fresh)
+                db.session.commit()
+        return jsonify({"ok": True, **{k: v for k, v in result.items() if k != "access_token"}})
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": scrub_secrets(str(exc))}), 400
+
+
+@workspaces_bp.route("/test-ads-new", methods=["POST"])
+@login_required
+def test_ads_new():
+    """Проверка токена VK Реклама при создании канала."""
+    denied = acc.guard("workspace_create")
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    token = (data.get("vk_ads_token") or "").strip()
+    try:
+        result = vk_ads_client.test_connection(token=token)
+        public = {k: v for k, v in result.items() if k != "access_token"}
+        return jsonify({"ok": True, **public})
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": scrub_secrets(str(exc))}), 400
 
 
 @workspaces_bp.route("/<int:workspace_id>/rubrics")
@@ -554,26 +727,37 @@ def rubrics(workspace_id: int):
 @login_required
 def create_rubric(workspace_id: int):
     ws = _user_workspace(workspace_id)
+    denied = acc.guard("workspace_settings", ws)
+    if denied:
+        return denied
     form = RubricForm()
     if form.validate_on_submit():
-        code = form.code.data.strip().lower()
-        exists = Rubric.query.filter_by(workspace_id=ws.id, code=code).first()
-        if exists:
-            flash("Рубрика с таким кодом уже есть в этом канале.", "danger")
-        else:
-            db.session.add(
-                Rubric(
-                    workspace_id=ws.id,
-                    code=code,
-                    title=form.title.data.strip(),
-                    prompt_text=form.prompt_text.data.strip(),
-                    sort_order=form.sort_order.data or 0,
-                    is_active=bool(form.is_active.data),
-                )
+        from webapp.services.slugify import unique_rubric_code
+
+        title = form.title.data.strip()
+        existing = {
+            r.code
+            for r in Rubric.query.filter_by(workspace_id=ws.id).all()
+            if r.code
+        }
+        code = unique_rubric_code(
+            title,
+            existing_codes=existing,
+            preferred=(form.code.data or "").strip().lower() or None,
+        )
+        db.session.add(
+            Rubric(
+                workspace_id=ws.id,
+                code=code,
+                title=title,
+                prompt_text=form.prompt_text.data.strip(),
+                sort_order=form.sort_order.data or 0,
+                is_active=bool(form.is_active.data),
             )
-            db.session.commit()
-            flash("Рубрика добавлена.", "success")
-            return redirect(url_for("workspaces.rubrics", workspace_id=ws.id))
+        )
+        db.session.commit()
+        flash(f"Рубрика добавлена (код: {code}).", "success")
+        return redirect(url_for("workspaces.rubrics", workspace_id=ws.id))
     return render_template("workspaces/rubric_edit.html", form=form, workspace=ws, rubric=None)
 
 
@@ -581,26 +765,32 @@ def create_rubric(workspace_id: int):
 @login_required
 def edit_rubric(workspace_id: int, rubric_id: int):
     ws = _user_workspace(workspace_id)
+    denied = acc.guard("workspace_settings", ws)
+    if denied:
+        return denied
     rubric = Rubric.query.filter_by(id=rubric_id, workspace_id=ws.id).first_or_404()
     form = RubricForm(obj=rubric)
     if form.validate_on_submit():
-        new_code = form.code.data.strip().lower()
-        clash = (
-            Rubric.query.filter_by(workspace_id=ws.id, code=new_code)
-            .filter(Rubric.id != rubric.id)
-            .first()
-        )
-        if clash:
-            flash("Другая рубрика уже использует этот код.", "danger")
-        else:
-            rubric.code = new_code
-            rubric.title = form.title.data.strip()
-            rubric.prompt_text = form.prompt_text.data.strip()
-            rubric.sort_order = form.sort_order.data or 0
-            rubric.is_active = bool(form.is_active.data)
-            db.session.commit()
-            flash("Рубрика сохранена.", "success")
-            return redirect(url_for("workspaces.rubrics", workspace_id=ws.id))
+        from webapp.services.slugify import unique_rubric_code
+
+        title = form.title.data.strip()
+        existing = {
+            r.code
+            for r in Rubric.query.filter_by(workspace_id=ws.id).all()
+            if r.code
+        }
+        # Код при правке не меняем без нужды — стабильные ссылки в планах
+        new_code = (rubric.code or "").strip().lower()
+        if not new_code:
+            new_code = unique_rubric_code(title, existing_codes=existing)
+        rubric.code = new_code
+        rubric.title = title
+        rubric.prompt_text = form.prompt_text.data.strip()
+        rubric.sort_order = form.sort_order.data or 0
+        rubric.is_active = bool(form.is_active.data)
+        db.session.commit()
+        flash("Рубрика сохранена.", "success")
+        return redirect(url_for("workspaces.rubrics", workspace_id=ws.id))
     return render_template(
         "workspaces/rubric_edit.html", form=form, workspace=ws, rubric=rubric
     )
@@ -610,6 +800,9 @@ def edit_rubric(workspace_id: int, rubric_id: int):
 @login_required
 def delete_rubric(workspace_id: int, rubric_id: int):
     ws = _user_workspace(workspace_id)
+    denied = acc.guard("workspace_settings", ws)
+    if denied:
+        return denied
     rubric = Rubric.query.filter_by(id=rubric_id, workspace_id=ws.id).first_or_404()
     db.session.delete(rubric)
     db.session.commit()
@@ -685,6 +878,9 @@ def _run_marketer_brief_job(app, job_id: str, payload: dict) -> None:
 def marketer_brief_generate(workspace_id: int):
     """ИИ-маркетолог: резюме канала + правила для копирайтера/редактора/визуала."""
     ws = _user_workspace(workspace_id)
+    denied = acc.guard("generate", ws)
+    if denied:
+        return denied
     # Берём актуальные значения из формы, если прислали (ещё не сохранённые)
     data = request.get_json(silent=True) or {}
     if data.get("save_fields"):
@@ -755,6 +951,9 @@ def _active_rubrics_payload(ws: Workspace) -> list[dict[str, str]]:
 
 def _run_content_plan_job(app, job_id: str, payload: dict) -> None:
     with app.app_context():
+        from webapp.services.user_keys import bind
+
+        bind(payload.get("user_id"))
         progress = job_store.make_progress_callback(job_id)
         try:
             progress("prepare", "ИИ-маркетолог изучает канал и аудиторию…")
@@ -859,6 +1058,8 @@ def content_plan(workspace_id: int):
         require_client_approval=bool(ws.require_client_approval),
         package_status=biz.package_status(ws),
         saved_plans=saved_plans,
+        publish_formats=pf_choices(),
+        sample_plan=_sample_plan_if_requested(),
     )
 
 
@@ -866,6 +1067,9 @@ def content_plan(workspace_id: int):
 @login_required
 def content_plan_generate(workspace_id: int):
     ws = _user_workspace(workspace_id)
+    denied = acc.guard("content", ws)
+    if denied:
+        return denied
     data = request.get_json(silent=True) or {}
     try:
         days = int(data.get("days") or 7)
@@ -934,6 +1138,9 @@ def content_plan_send_client(workspace_id: int):
     from webapp.services import business as biz
 
     ws = _user_workspace(workspace_id)
+    denied = acc.guard("content", ws)
+    if denied:
+        return denied
     data = request.get_json(silent=True) or {}
     items = data.get("items")
     if not isinstance(items, list) or not items:
@@ -972,7 +1179,7 @@ def content_plan_send_client(workspace_id: int):
             timing_logic=str(meta.get("timing_logic") or ""),
         )
     except ValueError as exc:
-        return jsonify({"ok": False, "error": str(exc)}), 400
+        return jsonify({"ok": False, "error": scrub_secrets(str(exc))}), 400
 
     token = biz.ensure_client_token(ws)
     return jsonify(
@@ -994,6 +1201,9 @@ def content_plan_approve(workspace_id: int):
     from webapp.services import business as biz
 
     ws = _user_workspace(workspace_id)
+    denied = acc.guard("content", ws)
+    if denied:
+        return denied
     data = request.get_json(silent=True) or {}
     items = data.get("items")
     plan_id = data.get("plan_id")
@@ -1030,7 +1240,7 @@ def content_plan_approve(workspace_id: int):
     try:
         biz.assert_can_add_posts(ws, len([x for x in items if isinstance(x, dict) and str(x.get("topic") or "").strip()]))
     except ValueError as exc:
-        return jsonify({"ok": False, "error": str(exc)}), 400
+        return jsonify({"ok": False, "error": scrub_secrets(str(exc))}), 400
 
     # Если план ещё не в архиве — сохраняем копию, чтобы потом можно было открыть
     if not batch:
@@ -1098,6 +1308,10 @@ def content_plan_view(workspace_id: int, plan_id: int):
     ws = _user_workspace(workspace_id)
     plan = ContentPlanBatch.query.filter_by(id=plan_id, workspace_id=ws.id).first_or_404()
     topics = biz.plan_items_from_json(plan.items_json)
+    for item in topics:
+        if isinstance(item, dict):
+            item["format"] = pf_code(item.get("format"))
+            item["format_label"] = pf_label(item.get("format"))
     return render_template(
         "workspaces/content_plan_view.html",
         workspace=ws,
@@ -1105,4 +1319,42 @@ def content_plan_view(workspace_id: int, plan_id: int):
         topics=topics,
         status_label=biz.client_status_label(plan.client_status),
         format_publish_at=sq.format_publish_at,
+        publish_formats=pf_choices(),
     )
+
+
+@workspaces_bp.route("/<int:workspace_id>/content-plan/<int:plan_id>/formats", methods=["POST"])
+@login_required
+def content_plan_update_formats(workspace_id: int, plan_id: int):
+    """Смена формата в уже сохранённом плане, пока он не в календаре."""
+    import json
+
+    from webapp.models import ContentPlanBatch, Draft
+    from webapp.services.publish_formats import apply_to_draft
+
+    ws = _user_workspace(workspace_id)
+    denied = acc.guard("content", ws)
+    if denied:
+        return denied
+    plan = ContentPlanBatch.query.filter_by(id=plan_id, workspace_id=ws.id).first_or_404()
+    if plan.saved_to_calendar:
+        flash("План уже в календаре. Формат каждого поста меняйте в карточке черновика.", "info")
+        return redirect(url_for("workspaces.content_plan_view", workspace_id=ws.id, plan_id=plan.id))
+    from webapp.services import business as biz
+
+    items = biz.plan_items_from_json(plan.items_json)
+    chosen = request.form.getlist("format")
+    for index, item in enumerate(items):
+        if isinstance(item, dict) and index < len(chosen):
+            item["format"] = pf_code(chosen[index])
+    plan.items_json = json.dumps(items, ensure_ascii=False)
+    for draft in Draft.query.filter_by(content_plan_id=plan.id, workspace_id=ws.id).all():
+        for item in items:
+            if isinstance(item, dict) and (item.get("topic") or "") == (draft.topic or ""):
+                kept = draft.post_text or ""
+                apply_to_draft(draft, item.get("format"))
+                draft.post_text = kept
+                break
+    db.session.commit()
+    flash("Форматы в плане обновлены. Тексты постов не менялись.", "success")
+    return redirect(url_for("workspaces.content_plan_view", workspace_id=ws.id, plan_id=plan.id))

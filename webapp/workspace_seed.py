@@ -5,7 +5,7 @@ from pathlib import Path
 
 from sqlalchemy import inspect, text
 
-from webapp.models import Rubric, Workspace, db
+from webapp.models import Rubric, User, Workspace, db
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -118,15 +118,97 @@ def ensure_schema() -> None:
         alters.append("ALTER TABLE draft ADD COLUMN publish_with_image INTEGER DEFAULT 1")
     if _column_exists("draft", "id") and not _column_exists("draft", "publish_with_video"):
         alters.append("ALTER TABLE draft ADD COLUMN publish_with_video INTEGER DEFAULT 0")
+    if _column_exists("draft", "id") and not _column_exists("draft", "publish_format"):
+        alters.append("ALTER TABLE draft ADD COLUMN publish_format TEXT DEFAULT 'image'")
+    if _column_exists("draft", "id") and not _column_exists("draft", "carousel_urls_json"):
+        alters.append("ALTER TABLE draft ADD COLUMN carousel_urls_json TEXT DEFAULT '[]'")
     if _column_exists("draft", "id") and not _column_exists("draft", "client_status"):
         alters.append("ALTER TABLE draft ADD COLUMN client_status TEXT DEFAULT 'none'")
     if _column_exists("draft", "id") and not _column_exists("draft", "client_comment"):
         alters.append("ALTER TABLE draft ADD COLUMN client_comment TEXT DEFAULT ''")
     if _column_exists("draft", "id") and not _column_exists("draft", "content_plan_id"):
         alters.append("ALTER TABLE draft ADD COLUMN content_plan_id INTEGER")
+    if _column_exists("workspace", "id") and not _column_exists("workspace", "vk_ads_token"):
+        alters.append("ALTER TABLE workspace ADD COLUMN vk_ads_token TEXT DEFAULT ''")
+    if _column_exists("workspace", "id") and not _column_exists("workspace", "vk_ads_account_id"):
+        alters.append("ALTER TABLE workspace ADD COLUMN vk_ads_account_id TEXT DEFAULT ''")
+    for col, ddl in [
+        ("vk_ads_client_id", "ALTER TABLE workspace ADD COLUMN vk_ads_client_id TEXT DEFAULT ''"),
+        ("vk_ads_client_secret", "ALTER TABLE workspace ADD COLUMN vk_ads_client_secret TEXT DEFAULT ''"),
+        ("vk_ads_refresh_token", "ALTER TABLE workspace ADD COLUMN vk_ads_refresh_token TEXT DEFAULT ''"),
+        ("vk_ads_token_expires_at", "ALTER TABLE workspace ADD COLUMN vk_ads_token_expires_at TEXT DEFAULT ''"),
+        ("vk_ads_status", "ALTER TABLE workspace ADD COLUMN vk_ads_status TEXT DEFAULT ''"),
+        ("vk_ads_last_error", "ALTER TABLE workspace ADD COLUMN vk_ads_last_error TEXT DEFAULT ''"),
+        ("vk_ads_connected_at", "ALTER TABLE workspace ADD COLUMN vk_ads_connected_at TEXT DEFAULT ''"),
+    ]:
+        if _column_exists("workspace", "id") and not _column_exists("workspace", col):
+            alters.append(ddl)
+    if _column_exists("user", "id") and not _column_exists("user", "privacy_accepted_at"):
+        alters.append("ALTER TABLE user ADD COLUMN privacy_accepted_at TEXT DEFAULT ''")
+    if _column_exists("user", "id") and not _column_exists("user", "privacy_policy_version"):
+        alters.append("ALTER TABLE user ADD COLUMN privacy_policy_version TEXT DEFAULT ''")
+    if _column_exists("user", "id") and not _column_exists("user", "kie_api_key"):
+        alters.append("ALTER TABLE user ADD COLUMN kie_api_key TEXT DEFAULT ''")
+    if _column_exists("security_event", "id") and not _column_exists("security_event", "ip_hash"):
+        alters.append("ALTER TABLE security_event ADD COLUMN ip_hash TEXT DEFAULT ''")
+    if _column_exists("security_event", "id") and not _column_exists("security_event", "agency_user_id"):
+        alters.append("ALTER TABLE security_event ADD COLUMN agency_user_id INTEGER")
     for stmt in alters:
         db.session.execute(text(stmt))
     if alters:
+        db.session.commit()
+    _migrate_seal_secrets()
+    _backfill_publish_formats()
+    try:
+        from webapp.services.security_ops import backfill_events
+
+        backfill_events()
+    except Exception:
+        db.session.rollback()
+
+
+def _migrate_seal_secrets() -> None:
+    """Старые plaintext-токены в БД → enc:… (один раз при старте)."""
+    from webapp.services.secrets_box import is_sealed, seal
+
+    fields = ("vk_token", "vk_ads_token", "vk_ads_client_secret", "vk_ads_refresh_token")
+    changed = False
+    for ws in Workspace.query.all():
+        for field in fields:
+            val = (getattr(ws, field, None) or "").strip()
+            if val and not is_sealed(val):
+                setattr(ws, field, seal(val))
+                changed = True
+    for user in User.query.all():
+        val = (user.vk_token or "").strip()
+        if val and not is_sealed(val):
+            user.vk_token = seal(val)
+            changed = True
+    if changed:
+        db.session.commit()
+
+
+def _backfill_publish_formats() -> None:
+    """Старые черновики: если уже есть видео, формат не должен остаться «картинка»."""
+    if not _column_exists("draft", "publish_format"):
+        return
+    from webapp.models import Draft
+
+    changed = False
+    for draft in Draft.query.all():
+        current = (getattr(draft, "publish_format", None) or "").strip()
+        if not current:
+            draft.publish_format = "image"
+            current = "image"
+            changed = True
+        if (
+            current == "image"
+            and bool(getattr(draft, "publish_with_video", False))
+            and (draft.video_url or "").strip()
+        ):
+            draft.publish_format = "clip"
+            changed = True
+    if changed:
         db.session.commit()
 
 
@@ -160,30 +242,28 @@ def seed_generic_rubrics(workspace: Workspace) -> None:
         )
 
 
-def ensure_default_workspace_for_user(user) -> Workspace:
-    """Если у пользователя нет каналов — создать пустой универсальный стартовый канал."""
-    existing = Workspace.query.filter_by(user_id=user.id).first()
-    if existing:
-        if not user.active_workspace_id:
-            user.active_workspace_id = existing.id
-            db.session.commit()
-        return existing
+def ensure_default_workspace_for_user(user):
+    """Открыть реальный канал команды. Пустой «Мой канал» сам больше не создаётся."""
+    from webapp.services import access as acc
+    from webapp.services.channel_care import AUTO_CHANNEL_NAME, retire_empty_staff_channels
 
-    ws = Workspace(
-        user_id=user.id,
-        name="Мой канал",
-        theme="",
-        description="",
-        brand_site="",
-        search_hint="",
-        knowledge_text="",
-        vk_token=user.vk_token or "",
-        vk_group_id=user.vk_group_id or "",
-        is_active=True,
+    retire_empty_staff_channels()
+    channels = list(acc.list_workspaces(user, active_only=True))
+    current = None
+    if user.active_workspace_id:
+        current = next((row for row in channels if row.id == user.active_workspace_id), None)
+    if current:
+        return current
+    picked = next(
+        (row for row in channels if (row.name or "").strip() != AUTO_CHANNEL_NAME),
+        None,
     )
-    db.session.add(ws)
-    db.session.flush()
-    seed_generic_rubrics(ws)
-    user.active_workspace_id = ws.id
-    db.session.commit()
-    return ws
+    if picked is None and channels:
+        picked = channels[0]
+    if picked and user.active_workspace_id != picked.id:
+        user.active_workspace_id = picked.id
+        db.session.commit()
+    elif not picked and user.active_workspace_id:
+        user.active_workspace_id = None
+        db.session.commit()
+    return picked

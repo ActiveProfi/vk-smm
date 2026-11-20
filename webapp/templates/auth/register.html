@@ -1,6 +1,7 @@
 {% extends "base.html" %}
-{% block title %}Создать рабочее пространство · VK SMM{% endblock %}
+{% block title %}Создать кабинет · VK SMM{% endblock %}
 {% block body_nav %}{% endblock %}
+{% block body_nav_end %}{% endblock %}
 {% block main_class %}auth-page{% endblock %}
 {% block content %}
 <div class="auth-brand">
@@ -9,28 +10,39 @@
   </a>
   <p class="auth-brand__lead">
     Система управления SMM-агентством ВКонтакте.
-    Ведите больше клиентов без расширения команды.
+    Ведите несколько каналов ВКонтакте в одном кабинете.
   </p>
 </div>
 <div class="auth-wrap panel">
   <p class="lk-kicker mb-2">Старт за минуту</p>
-  <h1 class="h3 mb-2">Создать рабочее пространство</h1>
+  <h1 class="h3 mb-2">Создать кабинет</h1>
   <p class="text-muted small mb-3">
-    Откроете кабинет и сможете добавить первого клиента ВК.
+    После входа добавите первый канал: название и тематику сообщества.
   </p>
-  <form method="post">
+  <form method="post" novalidate>
     {{ form.hidden_tag() }}
     <div class="mb-3">
       {{ form.username.label(class="form-label") }}
       {{ form.username(class="form-control form-control-lg") }}
+      {% for err in form.username.errors %}<div class="text-danger small">{{ err }}</div>{% endfor %}
     </div>
     <div class="mb-3">
       {{ form.password.label(class="form-label") }}
       {{ form.password(class="form-control form-control-lg") }}
+      {% for err in form.password.errors %}<div class="text-danger small">{{ err }}</div>{% endfor %}
     </div>
     <div class="mb-3">
       {{ form.password2.label(class="form-label") }}
       {{ form.password2(class="form-control form-control-lg") }}
+      {% for err in form.password2.errors %}<div class="text-danger small">{{ err }}</div>{% endfor %}
+    </div>
+    <div class="form-check mb-3">
+      {{ form.privacy_agree(class="form-check-input") }}
+      <label class="form-check-label small" for="privacy_agree">
+        Согласен с
+        <a href="{{ url_for('auth.privacy') }}" target="_blank" rel="noopener">политикой персональных данных</a>
+      </label>
+      {% for err in form.privacy_agree.errors %}<div class="text-danger small">{{ err }}</div>{% endfor %}
     </div>
     <button type="submit" class="btn btn-accent btn-lg w-100">Попробовать бесплатно</button>
   </form>

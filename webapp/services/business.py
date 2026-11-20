@@ -8,6 +8,7 @@ from typing import Any
 
 from webapp.models import ApiUsageLog, ContentPlanBatch, Draft, Rubric, Workspace, db
 from webapp.services import schedule_queue as sq
+from webapp.services.publish_formats import normalize_format as _plan_format
 
 PACKAGE_PRESETS = {
     "none": {"title": "Без пакета", "limit": 0},
@@ -36,6 +37,7 @@ def resolve_unit_cost(kind: str) -> float:
         "text": ("API_COST_TEXT_RUB", 3.0),
         "image": ("API_COST_IMAGE_RUB", 8.0),
         "video": ("API_COST_VIDEO_RUB", 25.0),
+        "animation": ("API_COST_ANIMATION_RUB", 45.0),
         "plan": ("API_COST_PLAN_RUB", 5.0),
         "marketer": ("API_COST_MARKETER_RUB", 5.0),
     }
@@ -49,6 +51,7 @@ DEFAULT_COSTS_RUB = {
     "text": resolve_unit_cost("text"),
     "image": resolve_unit_cost("image"),
     "video": resolve_unit_cost("video"),
+    "animation": resolve_unit_cost("animation"),
     "plan": resolve_unit_cost("plan"),
     "marketer": resolve_unit_cost("marketer"),
 }
@@ -57,6 +60,7 @@ KIND_LABELS_RU = {
     "text": "Текст поста",
     "image": "Картинка",
     "video": "Видео",
+    "animation": "Видео-анимация",
     "plan": "Контент-план (ИИ)",
     "marketer": "Резюме маркетолога",
 }
@@ -69,7 +73,7 @@ def usage_kind_title(kind: str | None) -> str:
 
 def cost_tariffs_for_ui() -> list[dict[str, Any]]:
     """Тарифы для подсказки в отчёте (оценка для агентства)."""
-    order = ("text", "image", "video", "plan", "marketer")
+    order = ("text", "image", "video", "animation", "plan", "marketer")
     return [
         {
             "kind": k,
@@ -180,6 +184,25 @@ def package_status(ws: Workspace) -> dict[str, Any]:
         "period_end": end.isoformat(),
         "period_label": f"{start.strftime('%d.%m.%Y')} — {end.strftime('%d.%m.%Y')}",
     }
+
+
+def package_allows_video(ws: Workspace) -> bool:
+    """Клип и видео-анимация — пакет Премиум, свой лимит или без пакета."""
+    code = (getattr(ws, "package_code", None) or "business").strip().lower()
+    return code in {"premium", "custom", "none"}
+
+
+def assert_can_use_video(ws: Workspace) -> None:
+    """Понятная ошибка, если на тарифе нет видео."""
+    if package_allows_video(ws):
+        assert_can_generate_post(ws)
+        return
+    title = package_title(getattr(ws, "package_code", None))
+    raise ValueError(
+        f"Клип и видео-анимация доступны на пакете «Премиум». "
+        f"Сейчас у канала пакет «{title}». "
+        f"Смените пакет в настройках канала — текст поста при этом сохранится."
+    )
 
 
 def assert_can_generate_post(ws: Workspace) -> None:
@@ -398,7 +421,61 @@ def can_auto_publish(draft: Draft, ws: Workspace) -> tuple[bool, str]:
     return True, "ok"
 
 
-def due_auto_publish_drafts(ws: Workspace) -> list[Draft]:
+def _parse_period_date(raw: str | None):
+    """YYYY-MM-DD → date или None."""
+    from datetime import date
+
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
+
+
+def resolve_auto_publish_period(
+    period: str = "today",
+    date_from: str = "",
+    date_to: str = "",
+) -> tuple[Any, Any, str]:
+    """Вернуть (date_from, date_to, подпись периода) для фильтра автопубликации."""
+    from datetime import date, timedelta
+
+    today = sq.now_tz().date()
+    key = (period or "today").strip().lower()
+
+    if key == "week":
+        # текущая неделя Пн–Вс
+        start = today - timedelta(days=today.weekday())
+        end = start + timedelta(days=6)
+        return start, end, f"{start.strftime('%d.%m.%Y')} — {end.strftime('%d.%m.%Y')}"
+
+    if key == "month":
+        start = today.replace(day=1)
+        if today.month == 12:
+            end = date(today.year + 1, 1, 1) - timedelta(days=1)
+        else:
+            end = date(today.year, today.month + 1, 1) - timedelta(days=1)
+        return start, end, f"{start.strftime('%d.%m.%Y')} — {end.strftime('%d.%m.%Y')}"
+
+    if key == "custom":
+        start = _parse_period_date(date_from) or today
+        end = _parse_period_date(date_to) or start
+        if end < start:
+            start, end = end, start
+        return start, end, f"{start.strftime('%d.%m.%Y')} — {end.strftime('%d.%m.%Y')}"
+
+    # today
+    return today, today, today.strftime("%d.%m.%Y")
+
+
+def due_auto_publish_drafts(
+    ws: Workspace,
+    *,
+    date_from=None,
+    date_to=None,
+) -> list[Draft]:
     drafts = (
         Draft.query.filter_by(workspace_id=ws.id)
         .filter(Draft.scheduled_for != "")
@@ -407,6 +484,15 @@ def due_auto_publish_drafts(ws: Workspace) -> list[Draft]:
     )
     out = []
     for d in drafts:
+        if date_from is not None or date_to is not None:
+            scheduled = sq.parse_scheduled_dt(d.scheduled_for)
+            if not scheduled:
+                continue
+            day = scheduled.date()
+            if date_from is not None and day < date_from:
+                continue
+            if date_to is not None and day > date_to:
+                continue
         ok, _ = can_auto_publish(d, ws)
         if ok:
             out.append(d)
@@ -464,6 +550,43 @@ def plan_items_from_json(raw: str | None) -> list[dict]:
     return data if isinstance(data, list) else []
 
 
+def _human_plan_title(start_date: str, days: int, count: int) -> str:
+    """«План с 1 декабря 2026», а не 2026-12-01."""
+    label = (start_date or "").strip()[:10]
+    try:
+        from datetime import date as date_cls
+
+        day = date_cls.fromisoformat(label)
+        months = (
+            "",
+            "января",
+            "февраля",
+            "марта",
+            "апреля",
+            "мая",
+            "июня",
+            "июля",
+            "августа",
+            "сентября",
+            "октября",
+            "ноября",
+            "декабря",
+        )
+        label = f"{day.day} {months[day.month]} {day.year}"
+    except ValueError:
+        label = label or "выбранной даты"
+    n = abs(int(count))
+    if n % 10 == 1 and n % 100 != 11:
+        word = "тема"
+    elif n % 10 in {2, 3, 4} and n % 100 not in {12, 13, 14}:
+        word = "темы"
+    else:
+        word = "тем"
+    if label and label != "выбранной даты":
+        return f"План с {label} · {days} дн. · {count} {word}"
+    return f"План · {days} дн. · {count} {word}"
+
+
 def create_plan_for_client(
     *,
     ws: Workspace,
@@ -491,17 +614,13 @@ def create_plan_for_client(
                 "rubric_title": str(raw.get("rubric_title") or "").strip(),
                 "scheduled_for": str(raw.get("scheduled_for") or "").strip(),
                 "note": str(raw.get("note") or "").strip(),
-                "format": str(raw.get("format") or "").strip(),
+                "format": _plan_format(raw.get("format")),
             }
         )
     if not clean:
         raise ValueError("В плане нет тем для согласования.")
 
-    title = f"План на {days} дн."
-    if start_date:
-        title = f"План с {start_date} · {days} дн. · {len(clean)} тем"
-    else:
-        title = f"План · {days} дн. · {len(clean)} тем"
+    title = _human_plan_title(start_date, int(days or 7), len(clean))
 
     ensure_client_token(ws)
     batch = ContentPlanBatch(
@@ -577,11 +696,14 @@ def create_planned_drafts_from_items(
         post_type = rubric.code if rubric else (code or "expert")
         scheduled = str(raw.get("scheduled_for") or "").strip()
         note = str(raw.get("note") or "").strip()
-        fmt = str(raw.get("format") or "").strip()
+        fmt = _plan_format(raw.get("format"))
         materials = ""
         if note or fmt:
             materials = f"Формат: {fmt}\nПодсказка плана: {note}".strip()
 
+        from webapp.services.publish_formats import apply_to_draft, media_flags
+
+        image_flag, video_flag = media_flags(fmt)
         draft = Draft(
             user_id=user_id,
             workspace_id=ws.id,
@@ -594,7 +716,11 @@ def create_planned_drafts_from_items(
             scheduled_for=scheduled,
             materials_text=materials[:5000],
             generation_warning="",
+            publish_format=fmt,
+            publish_with_image=image_flag,
+            publish_with_video=video_flag,
         )
+        apply_to_draft(draft, fmt)
         db.session.add(draft)
         db.session.flush()
         created_ids.append(draft.id)
@@ -685,30 +811,51 @@ def month_title_ru(year: int, month: int) -> str:
     return f"{name} {year}"
 
 
-def run_auto_publish_for_workspace(ws: Workspace) -> dict[str, Any]:
-    """Публикует due-черновики канала. Возвращает счётчики."""
+def run_auto_publish_for_workspace(
+    ws: Workspace,
+    *,
+    date_from=None,
+    date_to=None,
+    force: bool = False,
+    enable_auto: bool = False,
+) -> dict[str, Any]:
+    """Публикует due-черновики канала. Возвращает счётчики.
+
+    force=True — разовый запуск с кнопки, даже если галочка автопубликации выключена.
+    enable_auto=True — включить автопубликацию канала для следующих прогонов таймера.
+    date_from / date_to — ограничить по дате scheduled_for (включительно).
+    """
     import os
 
     from webapp.services import draft_visual as dv
     from webapp.services import vk_client
 
-    if not bool(ws.auto_publish_enabled):
+    if enable_auto and not bool(ws.auto_publish_enabled):
+        ws.auto_publish_enabled = True
+        db.session.commit()
+
+    if not force and not bool(ws.auto_publish_enabled):
         return {"ok": False, "error": "Автопубликация выключена в настройках канала.", "published": 0, "errors": []}
 
     # Как при ручной публикации: канал → иначе .env
-    token = (ws.vk_token or "").strip() or os.environ.get("VK_USER_TOKEN", "").strip() or os.environ.get(
+    from webapp.services.secrets_box import reveal
+
+    token = reveal(ws.vk_token) or os.environ.get("VK_USER_TOKEN", "").strip() or os.environ.get(
         "VK_COMMUNITY_TOKEN", ""
     ).strip()
     group_id = (ws.vk_group_id or "").strip() or os.environ.get("VK_GROUP_ID", "").strip()
     if not token or not group_id:
         return {
             "ok": False,
-            "error": "Нет VK токена или ID группы (в канале или в .env).",
+            "error": (
+                "Нет токена или номера группы ВК. "
+                "Откройте «Каналы» → этот канал → «Настройки» и заполните оба поля."
+            ),
             "published": 0,
             "errors": [],
         }
 
-    due = due_auto_publish_drafts(ws)
+    due = due_auto_publish_drafts(ws, date_from=date_from, date_to=date_to)
     published = 0
     errors: list[str] = []
     for d in due:
@@ -742,4 +889,6 @@ def run_auto_publish_for_workspace(ws: Workspace) -> dict[str, Any]:
         "checked": len(due),
         "errors": errors,
         "error": "",
+        "period_from": date_from.isoformat() if date_from else "",
+        "period_to": date_to.isoformat() if date_to else "",
     }

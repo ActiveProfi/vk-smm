@@ -5,6 +5,9 @@ flask-sqlalchemy>=3.1
 flask-bcrypt>=1.0
 flask-wtf>=1.2
 email-validator>=2.0
+cryptography>=42.0
+# Скачивание картинок и видео по ссылке в кабинете (webapp/smm.py)
+requests>=2.31
 
 # Чтение материалов
 python-docx>=1.1
@@ -19,3 +22,6 @@ reportlab>=4.0
 
 # Уже использовалось в проекте
 playwright
+
+# Проверки кабинета
+pytest>=8.0

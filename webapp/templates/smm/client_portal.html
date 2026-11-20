@@ -20,7 +20,7 @@
     {% endif %}
   {% endwith %}
 
-  <p class="lk-kicker mb-1">Согласование для клиента</p>
+  <p class="lk-kicker mb-1">Согласование плана канала</p>
   <h1 class="h3 mb-1">Согласование контент-плана</h1>
   <p class="text-muted mb-4">
     Канал: <strong>{{ workspace.name }}</strong>.
@@ -39,7 +39,7 @@
       </div>
 
       {% if p.audience_summary %}
-      <div class="alert alert-light border small mb-3">{{ p.audience_summary }}</div>
+      <div class="alert alert-light border small mb-3"><strong>Для кого этот план:</strong> {{ p.audience_summary }}</div>
       {% endif %}
 
       <div class="table-responsive mb-3">
@@ -58,7 +58,7 @@
               <td class="small">{{ format_publish_at(it.scheduled_for) if it.scheduled_for else '—' }}</td>
               <td class="small">{{ it.rubric_title or it.rubric_code or '—' }}</td>
               <td>{{ it.topic }}</td>
-              <td class="small">{{ it.format or '—' }}</td>
+              <td class="small">{{ it.format | publish_format_label }}</td>
             </tr>
             {% endfor %}
           </tbody>

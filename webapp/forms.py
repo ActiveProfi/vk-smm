@@ -17,18 +17,43 @@ from wtforms.validators import DataRequired, Length, EqualTo, Optional, Regexp, 
 
 
 class RegisterForm(FlaskForm):
-    username = StringField("Логин", validators=[DataRequired(), Length(3, 80)])
-    password = PasswordField("Пароль", validators=[DataRequired(), Length(6, 128)])
+    username = StringField(
+        "Логин",
+        validators=[
+            DataRequired(message="Впишите логин."),
+            Length(3, 80, message="Логин: от 3 до 80 символов."),
+            Regexp(r"^[^\s<>\"']+$", message="В логине нельзя использовать пробелы и символы < > \" '"),
+        ],
+    )
+    password = PasswordField(
+        "Пароль",
+        validators=[
+            DataRequired(message="Впишите пароль."),
+            Length(8, 128, message="Пароль: не меньше 8 символов."),
+        ],
+        render_kw={"placeholder": "Не меньше 8 символов"},
+    )
     password2 = PasswordField(
         "Повтор пароля",
-        validators=[DataRequired(), EqualTo("password", message="Пароли не совпадают")],
+        validators=[
+            DataRequired(message="Повторите пароль."),
+            EqualTo("password", message="Пароли не совпадают."),
+        ],
+    )
+    privacy_agree = BooleanField(
+        "Согласен с политикой обработки персональных данных",
+        default=False,
     )
     submit = SubmitField("Зарегистрироваться")
 
+    def validate_privacy_agree(self, field):
+        if not field.data:
+            raise ValidationError("Нужно принять политику персональных данных.")
+
 
 class LoginForm(FlaskForm):
-    username = StringField("Логин", validators=[DataRequired()])
-    password = PasswordField("Пароль", validators=[DataRequired()])
+    username = StringField("Логин", validators=[DataRequired(message="Впишите логин.")])
+    password = PasswordField("Пароль", validators=[DataRequired(message="Впишите пароль.")])
     submit = SubmitField("Войти")
 
 
@@ -76,6 +101,19 @@ class WorkspaceForm(FlaskForm):
         validators=[Optional(), Length(0, 64)],
         render_kw={"placeholder": "например: 123456789  (только цифры)"},
     )
+    vk_ads_account_id = StringField(
+        "ID / номер кабинета ВК Реклама",
+        validators=[Optional(), Length(0, 64)],
+        render_kw={"placeholder": "Например, 12345678 (для вашей заметки)"},
+    )
+    vk_ads_token = PasswordField(
+        "Токен API ВК Реклама",
+        validators=[Optional(), Length(0, 1024)],
+        render_kw={
+            "placeholder": "Оставьте пустым, чтобы не менять сохранённый токен",
+            "autocomplete": "new-password",
+        },
+    )
     seed_mode = SelectField(
         "Стартовые рубрики",
         choices=[
@@ -113,18 +151,35 @@ class WorkspaceForm(FlaskForm):
 
 
 class RubricForm(FlaskForm):
+    # Код создаётся автоматически из названия — поле скрыто в UI
     code = StringField(
         "Код (латиница)",
         validators=[
-            DataRequired(),
-            Length(2, 64),
-            Regexp(r"^[a-z][a-z0-9_]*$", message="Только латиница, цифры и _"),
+            Optional(),
+            Length(0, 64),
+            Regexp(
+                r"^$|^[a-z][a-z0-9_]*$",
+                message="Только латиница, цифры и _",
+            ),
         ],
     )
-    title = StringField("Название рубрики", validators=[DataRequired(), Length(2, 120)])
+    title = StringField(
+        "Название рубрики",
+        validators=[
+            DataRequired(message="Впишите название рубрики."),
+            Length(2, 120, message="Название рубрики: хотя бы 2 символа."),
+        ],
+    )
     prompt_text = TextAreaField(
         "Промпт рубрики",
-        validators=[DataRequired(), Length(20, 50000)],
+        validators=[
+            DataRequired(message="Опишите, как писать посты этой рубрики."),
+            Length(
+                20,
+                50000,
+                message="Промпт рубрики слишком короткий. Опишите правила хотя бы в 20 символах.",
+            ),
+        ],
         render_kw={"rows": 14},
     )
     sort_order = IntegerField("Порядок", default=0, validators=[Optional()])
@@ -167,7 +222,55 @@ class GenerateForm(FlaskForm):
     )
     enable_relevance = BooleanField("Проверка актуальности (отдельный агент)", default=True)
     generate_image = BooleanField("Картинка (GPT Image 2)", default=True)
-    generate_video = BooleanField("Видео (Kling)", default=False)
+    generate_video = BooleanField("Видео", default=False)
+    video_provider = SelectField(
+        "Нейросеть для видео",
+        choices=[
+            ("kling", "Kling 3.0"),
+            ("minimax", "MiniMax H3"),
+            ("veo", "Veo 3.1"),
+            ("hailuo", "Hailuo 02"),
+        ],
+        default="kling",
+        validators=[Optional()],
+    )
+    # Краткий бриф по скиллу «генерация видео» (6 блоков) — остальное допишет приложение
+    video_object = StringField(
+        "Персонаж / объект",
+        validators=[Optional(), Length(0, 300)],
+        render_kw={"placeholder": "например: керамическая кружка с кофе"},
+    )
+    video_action = StringField(
+        "Действие",
+        validators=[Optional(), Length(0, 300)],
+        render_kw={"placeholder": "например: пар поднимается и растворяется"},
+    )
+    video_place = StringField(
+        "Место",
+        validators=[Optional(), Length(0, 300)],
+        render_kw={"placeholder": "например: дубовая столешница у окна, утро"},
+    )
+    video_camera = SelectField(
+        "Камера",
+        choices=[],  # заполняется в __init__ из скилла
+        validators=[Optional()],
+    )
+    video_light = SelectField(
+        "Свет",
+        choices=[],
+        validators=[Optional()],
+    )
+    video_style = SelectField(
+        "Стиль",
+        choices=[],
+        validators=[Optional()],
+    )
+    video_negative = StringField(
+        "Запреты в кадре",
+        default="текст, надписи, логотипы, водяной знак",
+        validators=[Optional(), Length(0, 500)],
+        render_kw={"placeholder": "что нельзя показывать в ролике"},
+    )
     visual_footer = StringField(
         "Подпись внизу визуала",
         validators=[Optional(), Length(0, 200)],
@@ -175,6 +278,18 @@ class GenerateForm(FlaskForm):
     )
     cta = BooleanField("Добавить CTA", default=True)
     submit = SubmitField("Сгенерировать")
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        from webapp.services.video_prompt_skill import (
+            CAMERA_CHOICES,
+            LIGHT_CHOICES,
+            STYLE_CHOICES,
+        )
+
+        self.video_camera.choices = list(CAMERA_CHOICES)
+        self.video_light.choices = list(LIGHT_CHOICES)
+        self.video_style.choices = list(STYLE_CHOICES)
 
     def validate_materials(self, field):
         text = (field.data or "").strip()
@@ -378,28 +493,41 @@ class PaymentStubForm(FlaskForm):
         default=2,
         validators=[Optional()],
     )
-    payer_name = StringField(
-        "Имя плательщика",
-        validators=[DataRequired(), Length(2, 120)],
-        render_kw={"placeholder": "Как в тестовой карте"},
-    )
-    card_number = StringField(
-        "Номер карты (тест)",
-        validators=[DataRequired(), Length(12, 24)],
-        render_kw={"placeholder": "4242 4242 4242 4242", "autocomplete": "off"},
-    )
-    card_exp = StringField(
-        "Срок (ММ/ГГ)",
-        validators=[DataRequired(), Length(4, 7)],
-        render_kw={"placeholder": "12/28", "autocomplete": "off"},
-    )
-    card_cvc = StringField(
-        "CVC (тест)",
-        validators=[DataRequired(), Length(3, 4)],
-        render_kw={"placeholder": "123", "autocomplete": "off"},
-    )
     agree_test = BooleanField(
         "Понимаю: это тестовая оплата, деньги не списываются",
         default=False,
     )
     submit = SubmitField("Оплатить (тест)")
+
+
+class TeamInviteForm(FlaskForm):
+    """Добавить сотрудника в команду агентства."""
+
+    username = StringField(
+        "Логин сотрудника",
+        validators=[DataRequired(), Length(2, 80)],
+        render_kw={"placeholder": "например: manager1"},
+    )
+    role = SelectField(
+        "Роль",
+        choices=[
+            ("manager", "Менеджер — контент, генерация, публикация"),
+            ("viewer", "Наблюдатель — только просмотр и отчёты"),
+        ],
+        default="manager",
+        validators=[DataRequired()],
+    )
+    password = PasswordField(
+        "Пароль (если логина ещё нет — создадим аккаунт)",
+        validators=[Optional(), Length(0, 128)],
+        render_kw={
+            "placeholder": "От 8 символов, только для нового логина",
+            "autocomplete": "new-password",
+        },
+    )
+
+    def validate_password(self, field):
+        value = (field.data or "").strip()
+        if value and len(value) < 8:
+            raise ValidationError("Пароль нового сотрудника — не короче 8 символов.")
+    submit = SubmitField("Добавить в команду")
